@@ -33,6 +33,11 @@ from robots.libero.mt3.feasibility import _rrt_connect, _shortcut_path
 from robots.libero.mt3.replay import parse_cell
 
 
+def test_force_recorded_trace_is_disabled_by_default():
+    assert MT3Config().force_recorded_trace == ""
+    assert MT3Config.from_json({"force_recorded_trace": "trace.npz"}).force_recorded_trace == "trace.npz"
+
+
 def test_task_segment_plan_substitutes_refs_and_keeps_demo_local_frames(tmp_path: Path):
     from robots.libero.mt3.core import TaskLibrary
 
