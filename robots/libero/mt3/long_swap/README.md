@@ -38,17 +38,23 @@ task 9 的数字是修复"重复平移"之后的结果（见"已知问题"）。
 | `configs/tasks_0_8/mt3.json` | task 0–8：检索 + 20 cm 接近通道 |
 | `configs/task_9/mt3.json` | task 9：在上面的基础上，加最小干预选路、抓取倾斜、抓取补偿、放置平移和关门修正 |
 | `run_long_swap.py` | 并行运行，汇总到 `<out>/results.json` |
-| 数据包 `long_swap_data.tar.gz`（单独下载） | `library/libero_10/task_XX.npz`：每个任务的轨迹库（task 9 带 `placement_offset_recorded` 标记）；`scenes/libero_10_swap_t{task}_s{seed}.json`：500 个场景快照 |
+| 数据包 `long_swap_data.tar.gz`（从 [Release 10.22](https://github.com/ziweitianshi/RPent/releases/tag/10.22) 下载） | `library/libero_10/task_XX.npz`：每个任务的轨迹库（task 9 带 `placement_offset_recorded` 标记）；`scenes/libero_10_swap_t{task}_s{seed}.json`：500 个场景快照 |
 
 ## 运行
 
 1. 按 [LIBERO 使用文档](../../../../docs/source-zh/rst_source/usage/libero.rst) 安装 RPent 的 LIBERO 依赖（LIBERO-PRO、robosuite、MuJoCo、EGL）。不需要 VLA 和 SAM3 checkpoint。
-2. 解压数据包，例如解压到 `/path/to/long_swap_data`。
+2. 下载并解压数据包（72 MB），例如：
+
+```bash
+curl -LO https://github.com/ziweitianshi/RPent/releases/download/10.22/long_swap_data.tar.gz
+echo "5a555fb5410495bbb5d795ffbca513f86d97f1d394c90f3442ba38a990682a76  long_swap_data.tar.gz" | sha256sum -c -
+tar xzf long_swap_data.tar.gz   # 得到 long_swap_data/library 和 long_swap_data/scenes
+```
 3. 在仓库根目录运行：
 
 ```bash
 python robots/libero/mt3/long_swap/run_long_swap.py \
-  --out runs/long_swap_s10_49 --data /path/to/long_swap_data \
+  --out runs/long_swap_s10_49 --data $PWD/long_swap_data \
   --seeds 10-49 --procs 40 --egl-devices 0
 ```
 

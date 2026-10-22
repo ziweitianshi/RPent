@@ -26,3 +26,5 @@ build/
 
 # Long Swap replay data link created by run_long_swap.py.
 robots/libero/mt3/long_swap/data
+/long_swap_data/
+/long_swap_data.tar.gz
