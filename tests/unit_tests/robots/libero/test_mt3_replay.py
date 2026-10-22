@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,6 +30,54 @@ from robots.libero.mt3.core import (
     tilt_about,
 )
 from robots.libero.mt3.feasibility import _rrt_connect, _shortcut_path
+from robots.libero.mt3.replay import parse_cell
+
+
+def test_task_segment_plan_substitutes_refs_and_keeps_demo_local_frames(tmp_path: Path):
+    from robots.libero.mt3.core import TaskLibrary
+
+    donor_dir = tmp_path / "libero_object"
+    donor_dir.mkdir()
+    path = donor_dir / "task_00.npz"
+    poses = np.repeat(np.eye(4)[None], 6, axis=0)
+    poses[:, 0, 3] = np.arange(6)
+    segments = [
+        [{"ref": "source_object", "start": 0, "c": 1, "end": 2,
+          "events": [["grasp", 1, "source_object"]]}],
+        [{"ref": "source_object", "start": 0, "c": 1, "end": 2,
+          "events": [["grasp", 1, "source_object"]]}],
+    ]
+    np.savez_compressed(
+        path,
+        offsets=np.array([0, 3, 6]),
+        eef=np.repeat(np.eye(4)[None], 6, axis=0),
+        target=np.repeat(np.eye(4)[None], 6, axis=0),
+        gripper=np.zeros(6),
+        actions=np.zeros((6, 7)),
+        keep=np.ones(2, dtype=bool),
+        segments=np.array(json.dumps(segments)),
+        ref_bodies=np.array(json.dumps(["source_object"])),
+        meta=np.array("{}"),
+        **{"pose/source_object": poses},
+    )
+
+    lib = TaskLibrary.from_segment_plan(
+        tmp_path,
+        [{"suite": "libero_object", "task": 0, "segment": 0,
+          "substitute": {"source_object": "target_object"}}],
+        demos=2,
+    )
+
+    assert len(lib) == 2
+    assert lib.offsets.tolist() == [0, 3, 6]
+    assert lib.ref_bodies == ["target_object"]
+    assert [s[0]["ref"] for s in lib.segments] == ["target_object", "target_object"]
+    assert lib.segments[0][0]["events"] == [["grasp", 1, "target_object"]]
+    assert lib.pose["target_object"][:, 0, 3].tolist() == [0, 1, 2, 3, 4, 5]
+
+
+def test_longtask_suite_cell_parses_as_own_suite():
+    assert parse_cell("10_task_t3_s9") == ("libero_10_task", 3, 9)
 
 
 def test_native_rpent_policy_preserves_seed_method(monkeypatch):

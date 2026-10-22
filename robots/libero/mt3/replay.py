@@ -48,7 +48,7 @@ from robots.libero.mt3.core import (
 from rpent.utils.logging import get_output_dir
 
 #: ``<family>[_<perturbation>]_t<task>_s<seed>``, the tag the CLI builds per cell.
-_CELL = re.compile(r"^(10|goal|object|spatial)(?:_(swap|lan))?_t(\d+)_s(\d+)$")
+_CELL = re.compile(r"^(10_task|10|goal|object|spatial)(?:_(swap|lan))?_t(\d+)_s(\d+)$")
 CONFIG_NAME = "mt3.json"
 
 _SEGMENT_SPEC = {
@@ -127,7 +127,11 @@ def run_mt3(
     """The ``RobotSpec`` hook behind ``--planner mt3``: one episode, no retries."""
     suite, task, seed = parse_cell(cell_tag)
     cfg, library_dir = load_config(Path(toolkit.memory.root))
-    lib = TaskLibrary(library_dir / suite / f"task_{task:02d}.npz")
+    plan = cfg.task_segment_plan.get(str(task))
+    if plan is None:
+        lib = TaskLibrary(library_dir / suite / f"task_{task:02d}.npz")
+    else:
+        lib = TaskLibrary.from_segment_plan(library_dir, plan)
     hooks = _hooks(toolkit)
     trace: dict[str, list] = {"states": [], "actions": []}
     if cfg.record_trace:

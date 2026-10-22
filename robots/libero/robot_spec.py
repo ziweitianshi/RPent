@@ -76,7 +76,7 @@ FLASH_SUITES = frozenset(
 #: objects. ``_task`` changes the goal and ``_object`` the object assets.
 MT3_SUITES = frozenset(
     f"libero_{family}{suffix}"
-    for family in ("spatial", "object", "goal", "10")
+    for family in ("spatial", "object", "goal", "10", "10_task")
     for suffix in ("", "_swap", "_lan")
 )
 

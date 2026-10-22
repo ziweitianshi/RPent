@@ -154,6 +154,10 @@ class MT3Config:
     #: change (continuous symmetry), P folds it into +-P/2 degrees. Bodies that
     #: match nothing use their full yaw change.
     yaw_symmetry: dict[str, float] = field(default_factory=dict)
+    #: Optional per-task sequence of donor-library segments. Each item has
+    #: ``suite``, ``task``, ``segment`` and an optional ``substitute`` mapping.
+    #: Empty by default, so ordinary suite libraries are unchanged.
+    task_segment_plan: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "MT3Config":
@@ -426,6 +430,114 @@ class TaskLibrary:
             self.pose = {
                 k.split("/", 1)[1]: data[k] for k in data.files if k.startswith("pose/")
             }
+
+    @classmethod
+    def from_segment_plan(
+        cls, library_dir: Path, plan: list[dict[str, Any]], *, demos: int = 50
+    ) -> "TaskLibrary":
+        """Compose target-task demonstrations from configured donor segments.
+
+        Each plan item selects one segment index from a donor task and may
+        rename its reference body (and event body names) for transfer.
+        """
+        if not plan:
+            raise ValueError("task segment plan must contain at least one segment")
+        fields = ("eef", "target", "gripper", "actions")
+        rows: dict[str, list[np.ndarray]] = {key: [] for key in fields}
+        offsets = [0]
+        segments: list[list[dict[str, Any]]] = []
+        keep = []
+        ref_bodies: list[str] = []
+        poses: dict[str, list[np.ndarray]] = {}
+        meta: dict[str, Any] = {"source": "task_segment_plan", "plan": plan}
+        donors = []
+        required: dict[Path, set[int]] = {}
+        donor_cache: dict[Path, TaskLibrary] = {}
+        for item in plan:
+            source_path = library_dir / item["suite"] / f"task_{int(item['task']):02d}.npz"
+            donor = donor_cache.setdefault(source_path, cls(source_path))
+            selected = int(item["segment"])
+            substitute = item.get("substitute", {})
+            if not len(donor):
+                raise ValueError(f"donor library is empty: {source_path}")
+            if selected < 0:
+                raise ValueError(f"segment index must be non-negative: {selected}")
+            required.setdefault(source_path, set()).add(selected)
+            donors.append((donor, selected, substitute))
+
+        eligible = {
+            path: [
+                d for d in range(min(demos, len(donor)))
+                if donor.keep[d] and all(
+                    index < len(donor.segments[d]) for index in required[path]
+                )
+            ]
+            for path, donor in donor_cache.items()
+        }
+        n = min((len(ids) for ids in eligible.values()), default=0)
+        if not n:
+            raise ValueError("no donor demonstrations contain every requested segment")
+        for demo in range(n):
+            current_segments = []
+            current_rows = {key: [] for key in fields}
+            pose_chunks: list[tuple[str, np.ndarray, int]] = []
+            for donor, selected, substitute in donors:
+                source_demo = eligible[donor.path][demo]
+                source_seg = dict(donor.segments[source_demo][selected])
+                source_ref = source_seg["ref"]
+                target_ref = substitute.get(source_ref, source_ref)
+                frame = donor.frames(source_demo)
+                start, end = int(source_seg["start"]), int(source_seg["end"])
+                absolute = slice(int(frame.start) + start, int(frame.start) + end + 1)
+                local_start = sum(len(x) for x in current_rows["eef"])
+                for key in fields:
+                    current_rows[key].append(np.asarray(getattr(donor, key)[absolute]).copy())
+                local_seg = dict(source_seg)
+                local_seg["ref"] = target_ref
+                for name in ("start", "c", "end", "b"):
+                    if name in local_seg:
+                        local_seg[name] = int(local_seg[name]) - start + local_start
+                local_seg["events"] = [
+                    [event[0], int(event[1]) - start + local_start,
+                     substitute.get(event[2], event[2])]
+                    for event in local_seg.get("events", [])
+                ]
+                current_segments.append(local_seg)
+                if target_ref not in ref_bodies:
+                    ref_bodies.append(target_ref)
+                pose_chunks.append(
+                    (target_ref, np.asarray(donor.pose[source_ref][absolute]).copy(), end - start + 1)
+                )
+            demo_length = sum(len(x) for x in current_rows["eef"])
+            for key in fields:
+                rows[key].append(np.concatenate(current_rows[key], axis=0))
+            first_pose = {}
+            for ref, values, _ in pose_chunks:
+                first_pose.setdefault(ref, values[0])
+            for ref in ref_bodies:
+                series, previous = [], first_pose.get(ref, np.eye(4))
+                for chunk_ref, values, length in pose_chunks:
+                    if chunk_ref == ref:
+                        series.append(values)
+                        previous = values[-1]
+                    else:
+                        series.append(np.repeat(previous[None], length, axis=0))
+                poses.setdefault(ref, []).append(np.concatenate(series, axis=0))
+            offsets.append(offsets[-1] + demo_length)
+            segments.append(current_segments)
+            keep.append(True)
+
+        result = cls.__new__(cls)
+        result.path = library_dir
+        result.offsets = np.asarray(offsets, dtype=np.int64)
+        for key in fields:
+            setattr(result, key, np.concatenate(rows[key], axis=0))
+        result.keep = np.asarray(keep, dtype=bool)
+        result.segments = segments
+        result.ref_bodies = ref_bodies
+        result.meta = meta
+        result.pose = {ref: np.concatenate(chunks, axis=0) for ref, chunks in poses.items()}
+        return result
 
     def __len__(self) -> int:
         return len(self.offsets) - 1
