@@ -23,3 +23,6 @@ docs/build/
 build/
 .claude/settings.json
 .venv/
+
+# Long Swap replay data link created by run_long_swap.py.
+robots/libero/mt3/long_swap/data

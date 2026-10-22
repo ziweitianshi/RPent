@@ -1,0 +1,46 @@
+{
+  "library": "../../data/library",
+  "mode": "mt3",
+  "radius": 0.1,
+  "align_step": 0.01,
+  "settle_pos_tol": 0.003,
+  "settle_rot_tol_deg": 2.0,
+  "settle_max": 50,
+  "hold_steps": 30,
+  "yaw_symmetry": {
+    "bowl": 0,
+    "plate": 0,
+    "ramekin": 0,
+    "burner": 0
+  },
+  "approach_corridor": 0.2,
+  "carry_clearance": 0.15,
+  "record_trace": false,
+  "feasibility_check": "minimal",
+  "feasibility_interaction": true,
+  "feasibility_topk": 4,
+  "yaw_search_deg": [],
+  "yaw_free": [],
+  "rrt_fallback": false,
+  "grasp_compensation": true,
+  "grasp_tilt_deg": [
+    15,
+    30,
+    45,
+    60,
+    75
+  ],
+  "ref_offset": {
+    "microwave_1_main": [
+      0.0,
+      0.04,
+      0.0
+    ]
+  },
+  "alignment_replans_by_ref": {
+    "microdoorroot": 2
+  },
+  "segment_overshoot_by_ref": {
+    "microdoorroot": 0.04
+  }
+}
