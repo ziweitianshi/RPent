@@ -132,6 +132,19 @@ class MT3Config:
     #: Save the executed episode (state before each step, the action) as
     #: ``mt3_trace.npz`` for building a library from successful runs.
     record_trace: bool = False
+    #: Where object poses come from: "gt" reads the simulator; "perception"
+    #: estimates them from the agentview camera (SAM3 + depth, see
+    #: ``perception.py``) using the per-body settings in ``perception``.
+    pose_source: str = "gt"
+    perception: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: SAM3 service for ``pose_source: perception`` (else $RPENT_MT3_SAM3_ENDPOINT).
+    perception_endpoint: str = ""
+    #: Record raw perception next to the simulator poses at the episode start
+    #: and stop, without moving (calibration data on non-test scenes).
+    perception_calibrate: bool = False
+    #: Tilt [deg] applied to every grasp of a free object when no route check
+    #: chooses one (``grasp_tilt_deg`` needs the simulator-based checker).
+    grasp_tilt_fixed_deg: float = 0.0
     #: Retries of a grasp segment whose object was not picked up.
     grasp_retries: int = 0
     #: Demo retrieval: "nearest" (reference-body distance) or "reach" (most
@@ -163,6 +176,8 @@ class MT3Config:
         cfg = cls(**known)
         if cfg.mode not in MODES:
             raise ValueError(f"unknown MT3 mode {cfg.mode!r}; expected one of {MODES}")
+        if cfg.pose_source not in ("gt", "perception"):
+            raise ValueError(f"unknown pose_source {cfg.pose_source!r}")
         return cfg
 
     def transfer(
@@ -990,9 +1005,17 @@ class MT3Runner:
             transform = yaw_about(
                 transform, self._yaw, self._pivot(k, self.demo, transform, live)
             )
-        if self._tilt:
+        tilt = self._tilt
+        if (
+            not tilt
+            and self.cfg.grasp_tilt_fixed_deg
+            and self.gripper[b] <= 0
+            and any(e[0] == "grasp" for e in seg.get("events", ()))
+        ):
+            tilt = np.radians(self.cfg.grasp_tilt_fixed_deg)
+        if tilt:
             transform = tilt_about(
-                transform, self._tilt, self.eef[c], self.cfg.grasp_tilt_axis
+                transform, tilt, self.eef[c], self.cfg.grasp_tilt_axis
             )
         log: dict[str, Any] = {
             "segment": k,

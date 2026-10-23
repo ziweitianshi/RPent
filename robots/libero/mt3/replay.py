@@ -93,11 +93,31 @@ def load_config(memory_root: Path) -> tuple[MT3Config, Path]:
     return MT3Config.from_json(data), library
 
 
-def _hooks(toolkit: Any) -> EnvHooks:
+def _perceiver(env: Any, cfg: MT3Config) -> Any:
+    """Camera-based pose estimator for ``pose_source: perception``."""
+    from robots.libero.mt3.perception import PerceivedPoses, parse_specs
+    from rpent.robots.components.sam3_client import Sam3Client
+    from rpent.utils.rpc.client_utils import make_rpc_client
+
+    endpoint = cfg.perception_endpoint or os.environ.get("RPENT_MT3_SAM3_ENDPOINT", "")
+    if not endpoint:
+        raise ValueError(
+            "pose_source=perception needs perception_endpoint or $RPENT_MT3_SAM3_ENDPOINT"
+        )
+    return PerceivedPoses(
+        env, Sam3Client(make_rpc_client(endpoint)), parse_specs(cfg.perception)
+    )
+
+
+def _hooks(
+    toolkit: Any, cfg: MT3Config | None = None, perceiver: Any = None
+) -> EnvHooks:
     primitives = toolkit.primitives
     env = primitives.env
 
     def body_poses(bodies: list[str]) -> dict[str, np.ndarray]:
+        if perceiver is not None:
+            return perceiver(list(bodies))
         return {k: pose_from_wxyz(v) for k, v in env.poses(bodies).items()}
 
     return EnvHooks(
@@ -121,6 +141,33 @@ def execute(toolkit: Any, name: str, arguments: dict[str, Any]) -> None:
         raise RuntimeError(f"{name} failed: {error}\n{result.get('traceback', '')}")
 
 
+def _calibrate(toolkit: Any, lib: TaskLibrary, perceiver: Any, cell_tag: str) -> dict:
+    """Save the camera frame and the simulator poses at the episode start; no motion.
+
+    Calibration data for building point-cloud models on non-test scenes.
+    """
+    env = toolkit.primitives.env
+    out = Path(get_output_dir())
+    rgb, world = perceiver.frame()
+    np.save(out / "perception_rgb.npy", rgb)
+    np.save(out / "perception_world.npy", world.astype(np.float32))
+    parents = {perceiver.specs[b].parent for b in lib.ref_bodies} - {""}
+    record = {"cell": cell_tag, "gt": env.poses(sorted(set(lib.ref_bodies) | parents))}
+    (out / "perception_calib.json").write_text(json.dumps(record, indent=1))
+    (out / "mt3_episode.json").write_text(
+        json.dumps(
+            {"cell": cell_tag, "mode": "perception_calibrate", "success": False},
+            indent=1,
+        )
+    )
+    return {
+        "done": False,
+        "plan": 0,
+        "anchors": 0,
+        "program": "mt3/perception_calibrate",
+    }
+
+
 def run_mt3(
     toolkit: Any, cell_tag: str, note: Callable[[str], None] = lambda _: None
 ) -> dict:
@@ -128,7 +175,14 @@ def run_mt3(
     suite, task, seed = parse_cell(cell_tag)
     cfg, library_dir = load_config(Path(toolkit.memory.root))
     lib = TaskLibrary(library_dir / suite / f"task_{task:02d}.npz")
-    hooks = _hooks(toolkit)
+    perceiver = (
+        _perceiver(toolkit.primitives.env, cfg)
+        if cfg.pose_source == "perception"
+        else None
+    )
+    hooks = _hooks(toolkit, cfg, perceiver)
+    if cfg.perception_calibrate:
+        return _calibrate(toolkit, lib, perceiver, cell_tag)
     trace: dict[str, list] = {"states": [], "actions": []}
     if cfg.record_trace:
         env = toolkit.primitives.env
@@ -208,6 +262,8 @@ def run_mt3(
             for body, pose in scene.items()
         },
         "calls": runner.logs,
+        "pose_source": cfg.pose_source,
+        "perception_log": perceiver.log if perceiver is not None else None,
         "steps": runner.steps,
         "success": bool(toolkit.solved()),
         "terminated": bool(toolkit.primitives.env.terminated),
