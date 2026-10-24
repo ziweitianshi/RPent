@@ -157,6 +157,9 @@ class MT3Config:
     #: Register fixture parts again at every query, keeping the more consistent
     #: of the new and the earlier estimate (``LocatedPoses.refresh_parts``).
     perception_refresh_parts: bool = False
+    #: Pool the registrations of a fixture and all its parts (one rigid object)
+    #: when estimating any of them (``LocatedPoses.share_fixture``).
+    perception_share_fixture: bool = False
     #: Record raw perception next to the simulator poses at the episode start
     #: and stop, without moving (calibration data on non-test scenes).
     perception_calibrate: bool = False

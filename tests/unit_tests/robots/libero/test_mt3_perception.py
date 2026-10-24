@@ -248,3 +248,51 @@ def test_fixture_part_keeps_the_more_consistent_registration():
     assert np.allclose(third, second)
     assert perceiver.log[-1].get("kept_earlier")
     assert len(locator.calls) == 1
+
+
+def test_fixture_parts_pool_their_registrations():
+    from robots.libero.mt3.perception import BodySpec, LocatedPoses
+
+    meta = _camera()
+    world = _world_from_depth(np.full((64, 64), 1.0), meta)
+    spot = world[32, 32]
+    specs = {
+        "stove": BodySpec(category="stove", expect=list(spot)),
+        "knob": BodySpec(parent="stove"),
+        "burner": BodySpec(parent="stove"),
+    }
+    perceiver = LocatedPoses(
+        None,
+        _Seg(),
+        specs,
+        _Locator([32, 32]),
+        ["agentview"],
+        size=64,
+        share_fixture=True,
+    )
+    T_WC = np.asarray(meta["extrinsic_cam2world"])
+    poses = {"knob": spot + [0.05, 0.0, 0.0], "burner": spot + [-0.05, 0.0, 0.0]}
+    for part, pos in poses.items():
+        perceiver.refs[part] = {
+            "pose": np.stack([make_pose(pos, np.eye(3))] * 3),
+            "rgb": np.zeros((3, 64, 64, 3), np.uint8),
+            "depth_mm": np.zeros((3, 64, 64), np.uint16),
+            "segmap": np.zeros((3, 64, 64), bool),
+            "K": np.stack([np.eye(3)] * 3),
+            "T_WC": np.stack([T_WC] * 3),
+            "camera": np.array(["agentview"] * 3),
+            "seed": np.array([1, 2, 3]),
+        }
+    good, bad = np.eye(4), make_pose([0.0, 0.08, 0.0], np.eye(3))
+    # The knob's own registrations are mostly wrong, the burner's right.
+    perceiver.registration = _FakeRegistration(iter([bad, bad, good, good, good, good]))
+    rgb = np.zeros((64, 64, 3), np.uint8)
+    depth_mm = np.full((64, 64), 1000, np.uint16)
+    perceiver.views = lambda: {"agentview": (rgb, world, meta, depth_mm)}
+    out = perceiver(["knob", "burner"])
+    assert np.allclose(out["knob"][:3, 3], poses["knob"], atol=1e-9)
+    assert np.allclose(out["burner"][:3, 3], poses["burner"], atol=1e-9)
+    assert perceiver.log[0]["shared_with"] == ["burner"]
+    assert (
+        perceiver.log[1]["refs_failed"] == 0
+    )  # the burner reused the six registrations

@@ -246,6 +246,12 @@ def mask_extent(
     return float(np.hypot(*(hi - lo)[:2])), float((hi - lo)[2])
 
 
+def _ref_key(refs: dict[str, np.ndarray], i: int) -> tuple[str, int]:
+    """The training view a reference came from: camera and scene seed."""
+    seed = int(refs["seed"][i]) if "seed" in refs else i
+    return str(refs["camera"][i]), seed
+
+
 def combine_poses(poses: list[np.ndarray]) -> tuple[np.ndarray, float]:
     """Median position and consensus yaw (the sample nearest all others) of
     pose estimates, with the median distance [m] of the positions to the median."""
@@ -518,7 +524,9 @@ class LocatedPoses(PerceivedPoses):
     within ``max_spread``. A body that is not ``yaw_free`` keeps its nominal
     ``rotation``; a body that did not move (mask median or depth probe within
     1 cm) keeps its last estimate; with ``refresh_parts`` a fixture part is
-    registered again at every query, keeping the more consistent estimate.
+    registered again at every query, keeping the more consistent estimate; with
+    ``share_fixture`` a fixture and its parts pool the registrations of all their
+    references (one rigid object), so a part cannot drift from its siblings.
     """
 
     def __init__(
@@ -534,6 +542,7 @@ class LocatedPoses(PerceivedPoses):
         camera_fallback: bool = True,
         max_spread: float = 0.02,
         refresh_parts: bool = False,
+        share_fixture: bool = False,
     ):
         super().__init__(env, segmenter, specs, camera=cameras[0], size=size)
         self.locator = locator
@@ -543,6 +552,9 @@ class LocatedPoses(PerceivedPoses):
         self.camera_fallback = camera_fallback
         self.max_spread = max_spread
         self.refresh_parts = refresh_parts
+        self.share_fixture = share_fixture
+        self._query = 0
+        self._registration_cache: dict[Any, list] = {}
         self._ref_size: dict[tuple[str, str], tuple[float, float] | None] = {}
         #: Last located world point per segmented body (tracking anchor).
         self.anchor: dict[str, np.ndarray] = {}
@@ -661,7 +673,7 @@ class LocatedPoses(PerceivedPoses):
         refs = self.refs.get(body)
         if refs is None or self.registration is None:
             return None
-        reg, poses, errors = self.registration, [], 0
+        poses, errors = [], 0
         tic = time.monotonic()
         used = []
         # Text-prompt masks (as the references were chosen) before point masks,
@@ -675,29 +687,17 @@ class LocatedPoses(PerceivedPoses):
             if chosen is not None:
                 break
             used.append(cam)
-            cam_poses: list[np.ndarray] = []
-            mask = masks[cam]
-            rgb, _, meta, depth_mm = views[cam]
-            K = np.asarray(meta["intrinsic_K"], dtype=np.float64)
-            T_WC = np.asarray(meta["extrinsic_cam2world"], dtype=np.float64)
-            for i in range(len(refs["pose"])):
-                if not self.cross_camera and str(refs["camera"][i]) != cam:
-                    continue
-                try:
-                    live = reg.scene(rgb, depth_mm, mask, K)
-                    demo = reg.scene(
-                        refs["rgb"][i],
-                        refs["depth_mm"][i],
-                        refs["segmap"][i],
-                        refs["K"][i],
-                    )
-                    W4 = reg.transfer(
-                        demo, live, T_WC, refs["pose"][i][:3, 3], refs["T_WC"][i]
-                    )
-                except Exception:  # noqa: BLE001 -- e.g. too few points; skip this pair
-                    errors += 1
-                    continue
-                cam_poses.append(W4 @ refs["pose"][i])
+            members = self._fixture_members(body, target)
+            entries, failed = self._registrations(
+                members, target, cam, masks[cam], views[cam]
+            )
+            errors += failed
+            own = {_ref_key(refs, i): refs["pose"][i] for i in range(len(refs["pose"]))}
+            # Every registration of the rigid fixture carries this body's
+            # reference pose taken from the same view.
+            cam_poses = [W4 @ own[key] for key, W4 in entries if key in own]
+            if len(members) > 1:
+                info["shared_with"] = [m for m in members if m != body]
             poses += cam_poses
             if self.camera_fallback and cam_poses:
                 # A camera whose references disagree gives way to the next one.
@@ -739,6 +739,52 @@ class LocatedPoses(PerceivedPoses):
             "spread": spread,
         }
         return pose
+
+    def _fixture_members(self, body: str, target: str) -> list[str]:
+        """Bodies whose references are registered together with ``body``'s: with
+        ``share_fixture``, the fixture and all its parts (one rigid object)."""
+        if not self.share_fixture:
+            return [body]
+        members = [
+            b
+            for b, spec in self.specs.items()
+            if (b == target or spec.parent == target) and b in self.refs
+        ]
+        return members if body in members else [body]
+
+    def _registrations(self, members, target, cam, mask, view):
+        """``([(view key, W4)], failures)``: the live ``mask`` of ``cam``
+        registered to every reference view of ``members`` (cached per query)."""
+        key = (self._query, target, cam, tuple(members))
+        if key in self._registration_cache:
+            return self._registration_cache[key], 0
+        reg = self.registration
+        rgb, _, meta, depth_mm = view
+        K = np.asarray(meta["intrinsic_K"], dtype=np.float64)
+        T_WC = np.asarray(meta["extrinsic_cam2world"], dtype=np.float64)
+        entries, failed = [], 0
+        for member in members:
+            refs = self.refs[member]
+            for i in range(len(refs["pose"])):
+                if not self.cross_camera and str(refs["camera"][i]) != cam:
+                    continue
+                try:
+                    live = reg.scene(rgb, depth_mm, mask, K)
+                    demo = reg.scene(
+                        refs["rgb"][i],
+                        refs["depth_mm"][i],
+                        refs["segmap"][i],
+                        refs["K"][i],
+                    )
+                    W4 = reg.transfer(
+                        demo, live, T_WC, refs["pose"][i][:3, 3], refs["T_WC"][i]
+                    )
+                except Exception:  # noqa: BLE001 -- e.g. too few points; skip this pair
+                    failed += 1
+                    continue
+                entries.append((_ref_key(refs, i), W4))
+        self._registration_cache = {key: entries}
+        return entries, failed
 
     def _plausible_size(self, body: str, cam: str, mask: np.ndarray, view) -> bool:
         """False for a mask much larger than every reference mask of the body in
@@ -830,6 +876,7 @@ class LocatedPoses(PerceivedPoses):
         return out
 
     def __call__(self, bodies: list[str]) -> dict[str, np.ndarray]:
+        self._query += 1
         views = self.views()
         target_of = {b: self.specs[b].parent or b for b in bodies}
         pixels = {t: self._track(t, views) for t in set(target_of.values())}
