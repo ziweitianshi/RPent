@@ -400,6 +400,82 @@ def test_reference_offset_skips_demos_recorded_with_it():
     assert not offset_recorded(SimpleNamespace(meta={}), 0)
 
 
+def test_microwave_insert_skill_is_config_gated_and_uses_start_pose_estimates():
+    frames = 8
+    poses = np.repeat(np.eye(4)[None], frames, axis=0)
+    poses[:, 0, 3] = np.linspace(0.0, 0.07, frames)
+    mug = np.eye(4)
+    mug[2, 3] = 0.9
+    microwave = np.eye(4)
+    microwave[:3, 3] = [0.2, -0.3, 0.92]
+    segments = [
+        {
+            "ref": "white_yellow_mug_1_main",
+            "start": 0,
+            "c": 2,
+            "end": 4,
+            "events": [["grasp", 2, "white_yellow_mug_1"]],
+        },
+        {
+            "ref": "microwave_1_main",
+            "start": 4,
+            "c": 6,
+            "end": 8,
+            "events": [["release", 6, "microwave_1"]],
+        },
+    ]
+    lib = SimpleNamespace(
+        frames=lambda _: slice(0, frames),
+        eef=poses,
+        target=poses.copy(),
+        gripper=np.array([-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0]),
+        actions=np.zeros((frames, 7)),
+        segments=[segments],
+        pose={
+            "white_yellow_mug_1_main": np.repeat(mug[None], frames, axis=0),
+            "microwave_1_main": np.repeat(microwave[None], frames, axis=0),
+        },
+    )
+    current = poses[0].copy()
+    commands = []
+
+    def step(action):
+        commands.append(action.copy())
+        current[:3, 3] += action[:3] * POS_SCALE
+
+    hooks = EnvHooks(
+        step,
+        lambda: current.copy(),
+        lambda names: {
+            "white_yellow_mug_1_main": mug.copy(),
+            "microwave_1_main": microwave.copy(),
+        },
+        lambda: False,
+    )
+    disabled = MT3Runner(lib, 0, MT3Config(), hooks)
+    assert disabled.cfg.placement_skill_by_ref == {}
+    enabled = MT3Runner(
+        lib,
+        0,
+        MT3Config(placement_skill_by_ref={"microwave_1_main": {"target_y": 0.025}}),
+        hooks,
+    )
+    enabled._start_poses = {
+        "white_yellow_mug_1_main": mug.copy(),
+        "microwave_1_main": microwave.copy(),
+    }
+    enabled._grasp_eef = np.eye(4)
+    enabled._in_hand = np.linalg.inv(enabled._grasp_eef) @ mug
+    enabled._last_gripper = 1.0
+    log = enabled._placement_skill(
+        1, enabled.cfg.placement_skill_by_ref["microwave_1_main"]
+    )
+    assert log["skill"] == "microwave_insert"
+    assert "episode_start_pose_estimates" in log["used_inputs"]
+    assert len(commands) > 20
+    assert commands[-1][6] == -1.0
+
+
 def test_agent_replay_catalog_and_bounds(monkeypatch, tmp_path):
     from robots.libero.mt3 import agent
 
