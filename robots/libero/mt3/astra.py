@@ -247,7 +247,11 @@ class AstraLocator:
                     timeout=self.timeout,
                     env={**os.environ, "CODEX_HOME": _codex_home()},
                 )
-                delay = _usage_limit_delay(proc.stderr) if proc.returncode else None
+                delay = (
+                    _usage_limit_delay(proc.stderr + proc.stdout)
+                    if proc.returncode
+                    else None
+                )
                 if delay is None or waited + delay > self.max_wait:
                     break
                 logger.warning("codex usage limit; retrying in %.0f s", delay)
@@ -255,7 +259,7 @@ class AstraLocator:
                 waited += delay
             answer_path = Path(tmp, "answer.txt")
             answer = answer_path.read_text() if answer_path.exists() else ""
-        usage = None
+        usage, error = None, ""
         for line in proc.stdout.splitlines():
             try:
                 event = json.loads(line)
@@ -263,6 +267,8 @@ class AstraLocator:
                 continue
             if isinstance(event, dict) and event.get("usage"):
                 usage = event["usage"]
+            if isinstance(event, dict) and event.get("type") == "error":
+                error = str(event.get("message", ""))
         record: dict[str, Any] = {
             "categories": list(categories),
             "seconds": round(time.monotonic() - tic, 1),
@@ -271,7 +277,8 @@ class AstraLocator:
             "waited_s": round(waited),
         }
         if proc.returncode:
-            record["stderr"] = proc.stderr[-300:]
+            # With --json the model error (e.g. the usage limit) is an event on stdout.
+            record["stderr"] = (error or proc.stderr)[-300:]
         try:
             raw = _parse(answer)
         except (ValueError, json.JSONDecodeError) as exc:
