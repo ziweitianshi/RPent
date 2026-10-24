@@ -517,8 +517,10 @@ class LocatedPoses(PerceivedPoses):
         self.cross_camera = cross_camera
         #: Last located world point per segmented body (tracking anchor).
         self.anchor: dict[str, np.ndarray] = {}
-        #: Per body: last estimate and the mask medians it came from.
-        self._cache: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
+        #: Per body: last estimate, its mask medians, and per camera the world
+        #: point seen at the projection of its first median (a probe of whether
+        #: the body moved).
+        self._cache: dict[str, dict[str, Any]] = {}
 
     def views(
         self,
@@ -597,12 +599,21 @@ class LocatedPoses(PerceivedPoses):
             return None
         self.anchor[target] = next(iter(medians.values()))
         cached = self._cache.get(body)
-        if cached is not None and any(
-            cam in cached[1] and np.linalg.norm(medians[cam] - cached[1][cam]) < 0.01
-            for cam in medians
+        if cached is not None and (
+            any(
+                np.linalg.norm(medians[cam] - cached["medians"][cam]) < 0.01
+                for cam in medians
+                if cam in cached["medians"]
+            )
+            or any(
+                np.linalg.norm(probe - cached["probes"][cam]) < 0.01
+                for cam, probe in self._probes(cached["point"], views).items()
+                if cam in cached["probes"]
+            )
         ):
+            # Unmoved (a probe unchanged even if the gripper now hides part of it).
             info["reused"] = True
-            return cached[0]
+            return cached["pose"]
         refs = self.refs.get(body)
         if refs is None or self.registration is None:
             return None
@@ -643,8 +654,23 @@ class LocatedPoses(PerceivedPoses):
         if not spec.yaw_free:
             # Bodies that keep their orientation across scenes: only the position is estimated.
             pose[:3, :3] = quat_wxyz_to_matrix(spec.rotation)
-        self._cache[body] = (pose, medians)
+        point = next(iter(medians.values()))
+        self._cache[body] = {
+            "pose": pose,
+            "medians": medians,
+            "point": point,
+            "probes": self._probes(point, views),
+        }
         return pose
+
+    def _probes(self, point: np.ndarray, views) -> dict[str, np.ndarray]:
+        """World point seen at ``point``'s projection, per camera."""
+        out = {}
+        for cam, (_, world, meta, _) in views.items():
+            px = project(meta, point, self.size)
+            if px is not None and np.isfinite(world[px]).all():
+                out[cam] = np.asarray(world[px], dtype=float)
+        return out
 
     def __call__(self, bodies: list[str]) -> dict[str, np.ndarray]:
         views = self.views()
