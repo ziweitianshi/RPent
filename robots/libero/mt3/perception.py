@@ -23,13 +23,21 @@ instances of the same object). The pose is then found by registering the
 body's point-cloud model (points in the body frame, collected on training
 scenes) to the masked points with ICP restricted to x, y, z and, for bodies
 that turn, yaw, the degrees of freedom MT3 transfers. Without a model the
-masked median plus a calibrated offset is used. Fixture parts (a stove button,
+masked median plus a calibrated offset is used. With ``refs`` the pose comes
+instead from MT3's relative registration (Dreczkowski et al., original
+``learning_thousand_tasks`` code: PointNet++ yaw, generalised ICP, 4-DOF
+projection) of the live mask against each reference view of the body, a
+training-scene frame whose pose is known; the median over the references is
+kept. Fixture parts (a stove button,
 a cabinet drawer, a microwave door hinge) are placed at a fixed transform from
 their fixture. Nothing here reads simulator object state.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,6 +73,10 @@ class BodySpec:
     model: str = ""
     #: Whether ICP may turn the body about the vertical axis.
     yaw_free: bool = False
+    #: Reference views (.npz with stacked ``rgb``, ``depth_mm``, ``segmap``,
+    #: ``K``, ``T_WC``, ``pose`` of training frames); MT3 relative registration
+    #: against them when set, ahead of ``model``.
+    refs: str = ""
 
 
 def parse_specs(raw: dict[str, Any]) -> dict[str, BodySpec]:
@@ -87,6 +99,100 @@ def masked_points(mask: np.ndarray, world: np.ndarray) -> np.ndarray:
     pts = world[mask].astype(np.float64)
     valid = np.isfinite(pts).all(axis=1) & (np.abs(pts).sum(axis=1) > 1e-6)
     return pts[valid]
+
+
+def depth_from_world(world: np.ndarray, cam2world: np.ndarray) -> np.ndarray:
+    """Depth along the camera axis [m] of every pixel of a world map; 0 where invalid."""
+    cam = (world.reshape(-1, 3).astype(np.float64) - cam2world[:3, 3]) @ cam2world[
+        :3, :3
+    ]
+    z = np.where(np.isfinite(cam[:, 2]) & (cam[:, 2] > 0), cam[:, 2], 0.0)
+    return z.reshape(world.shape[:2])
+
+
+class MT3Registration:
+    """Demo -> live 4-DOF transforms with the original MT3 code (imported unchanged
+    from ``$RPENT_MT3_ORIG_REPO``, branch ``libero-adapt``)."""
+
+    def __init__(self, repo: str = "", device: str = ""):
+        repo = repo or os.environ.get(
+            "RPENT_MT3_ORIG_REPO", "/data0/zsq/learning_thousand_tasks"
+        )
+        if repo not in sys.path:
+            sys.path.insert(0, repo)
+        import torch
+        from deployment.deploy_mt3 import apply_4dof_inductive_bias
+        from thousand_tasks.core.utils.scene_state import SceneState
+        from thousand_tasks.perception.pose_estimation.icp_6dof_pose_estimation_refinement import (
+            Open3dIcpPoseRefinement,
+        )
+        from thousand_tasks.perception.pose_estimation.pnet_4dof_pose_regressor import (
+            PointnetPoseRegressor_4dof,
+        )
+
+        if not device:
+            gpu = os.environ.get("RPENT_MT3_TORCH_DEVICE") or os.environ.get(
+                "MUJOCO_EGL_DEVICE_ID", "0"
+            )
+            device = gpu if not gpu.isdigit() else f"cuda:{gpu}"
+        self.SceneState = SceneState
+        self.bias = apply_4dof_inductive_bias
+        self.device = torch.device(device)
+        self.pnet: Any = None
+        # Parameters of deploy_mt3.py.
+        self.gicp = Open3dIcpPoseRefinement(
+            error_metric="generalised-icp",
+            max_correspondence_distance=0.1,
+            max_iteration=20,
+            depth_units="mm",
+            timeout=3,
+        )
+        self._regressor = PointnetPoseRegressor_4dof
+
+    def scene(self, rgb, depth_mm, mask, K):
+        st = self.SceneState.initialise_from_dict(
+            {
+                "rgb": np.ascontiguousarray(rgb, dtype=np.uint8),
+                "depth": depth_mm,
+                "segmap": np.asarray(mask, dtype=bool),
+                "intrinsic_matrix": np.asarray(K, dtype=np.float64),
+            }
+        )
+        st.erode_segmap()
+        st.crop_object_using_segmap()
+        return st
+
+    def transfer(self, demo, live, T_WC: np.ndarray, pivot: np.ndarray) -> np.ndarray:
+        """``W_T_delta_4dof`` taking the demo scene's object onto the live one
+        (both seen by the camera ``T_WC``), rotated about ``pivot``."""
+        if self.pnet is None:
+            self.pnet = self._regressor(
+                filter_pointcloud=True,
+                n_points=2048,
+                T_WC=T_WC,
+                T_WC_demo=T_WC,
+                depth_units="mm",
+                device=self.device,
+            )
+        self.pnet.extrinsics = self.pnet.extrinsics_demo = T_WC
+        W_T = self.pnet.estimate_relative_pose(
+            scene1_state=demo, scene2_state=live, visualise_pcds=False, verbose=False
+        )
+        C_T = np.linalg.inv(T_WC) @ W_T @ T_WC
+        C_ref = self.gicp.refine_relative_pose(
+            scene1_state=demo,
+            scene2_state=live,
+            T_WC_live=T_WC,
+            T_delta_init=C_T,
+            verbose=False,
+            visualise_pcds=False,
+        )
+        W_ref = T_WC @ C_ref @ np.linalg.inv(T_WC)
+        # deploy_mt3 rotates about the gripper tip, 0.24 m along the Sawyer wrist z;
+        # here the pivot is given directly.
+        T_WE = np.eye(4)
+        T_WE[:3, 3] = np.asarray(pivot) - np.array([0.0, 0.0, 0.24])
+        return self.bias(W_T_delta_6dof=W_ref, T_WE=T_WE)
 
 
 def quat_wxyz_to_matrix(quat: list[float]) -> np.ndarray:
@@ -155,6 +261,17 @@ class PerceivedPoses:
         self.models = {
             body: np.load(spec.model) for body, spec in specs.items() if spec.model
         }
+        self.refs = {}
+        for body, spec in specs.items():
+            if spec.refs:
+                with np.load(spec.refs) as data:
+                    self.refs[body] = {k: data[k] for k in data.files}
+        self.registration: MT3Registration | None = (
+            MT3Registration() if self.refs else None
+        )
+        #: Camera intrinsics and cam-to-world of the last frame (set by ``frame``).
+        self.camera_meta: dict[str, Any] | None = None
+        self._mask: np.ndarray | None = None
         #: Last estimate per body; reused when a body is not found (occluded).
         self.last: dict[str, np.ndarray] = {}
         #: Per-call diagnostics, appended for every estimated body.
@@ -168,6 +285,7 @@ class PerceivedPoses:
             camera_name=self.camera, height=self.size, width=self.size, depth=True
         )
         meta = self.env.get_camera_meta(self.camera, self.size, self.size)
+        self.camera_meta = meta
         world = _world_from_depth(_metric_depth(depth, meta)[::-1], meta)
         return np.ascontiguousarray(np.asarray(rgb)[::-1]), world
 
@@ -188,6 +306,7 @@ class PerceivedPoses:
         )
         prompts = [prompt] if isinstance(prompt, str) else list(prompt)
         best: tuple[float, np.ndarray | None, dict[str, Any]] = (-1.0, None, {})
+        self._mask = None
         for text in prompts:
             for win in windows:
                 r0, r1, c0, c1 = 0, rgb.shape[0], 0, rgb.shape[1]
@@ -213,6 +332,7 @@ class PerceivedPoses:
                         continue
                 score = float(result.score or 0.0)
                 if score > best[0]:
+                    self._mask = mask
                     best = (
                         score,
                         pts,
@@ -234,6 +354,10 @@ class PerceivedPoses:
         pts, info = self.segment(rgb, world, spec.prompt, spec, expect)
         if pts is None:
             return None, info
+        if body in self.refs and self.camera_meta is not None:
+            pose = self._from_refs(body, rgb, world, self._mask, info)
+            if pose is not None:
+                return pose, info
         start = np.eye(4)
         start[:3, :3] = quat_wxyz_to_matrix(spec.rotation)
         if body in self.models:
@@ -247,6 +371,47 @@ class PerceivedPoses:
         start[:3, 3] = np.median(pts, axis=0) + np.asarray(spec.offset)
         info.update(n=int(len(pts)))
         return start, info
+
+    def _from_refs(self, body, rgb, world, mask, info) -> np.ndarray | None:
+        """Median over the reference views of ``T_delta_4dof @ reference pose``."""
+        reg, refs = self.registration, self.refs[body]
+        K = np.asarray(self.camera_meta["intrinsic_K"], dtype=np.float64)
+        T_WC = np.asarray(self.camera_meta["extrinsic_cam2world"], dtype=np.float64)
+        depth_mm = np.round(1000 * depth_from_world(world, T_WC)).astype(np.uint16)
+        tic = time.monotonic()
+        poses, errors = [], 0
+        for i in range(len(refs["pose"])):
+            try:
+                live = reg.scene(rgb, depth_mm, mask, K)
+                demo = reg.scene(
+                    refs["rgb"][i], refs["depth_mm"][i], refs["segmap"][i], refs["K"][i]
+                )
+                W4 = reg.transfer(demo, live, T_WC, refs["pose"][i][:3, 3])
+            except Exception:  # noqa: BLE001 -- e.g. too few points; skip this reference
+                errors += 1
+                continue
+            poses.append(W4 @ refs["pose"][i])
+        info.update(
+            refs_ok=len(poses),
+            refs_failed=errors,
+            refs_s=round(time.monotonic() - tic, 2),
+        )
+        if not poses:
+            return None
+        pos = np.stack([p[:3, 3] for p in poses])
+        yaws = np.array([np.arctan2(p[1, 0], p[0, 0]) for p in poses])
+        mid = np.median(pos, axis=0)
+        # Circular median of the yaw: the sample nearest all others.
+        spread = [np.abs(np.angle(np.exp(1j * (yaws - y)))).sum() for y in yaws]
+        k = int(np.argmin(spread))
+        pose = poses[k].copy()
+        pose[:3, 3] = mid
+        info.update(
+            refs_spread_cm=round(
+                100 * float(np.median(np.linalg.norm(pos - mid, axis=1))), 2
+            )
+        )
+        return pose
 
     def __call__(self, bodies: list[str]) -> dict[str, np.ndarray]:
         rgb, world = self.frame()
