@@ -171,6 +171,10 @@ class MT3Config:
     #: ``*_main``: stove knob and burner, drawer, door hinge), whose state the
     #: robot changes during the episode; False queries them every time.
     freeze_parts: bool = True
+    #: Open the gripper during the final hold. Demonstrations stop when the
+    #: task succeeds, often with the object still grasped, so a replay a few
+    #: millimetres short leaves it hanging without contact.
+    release_at_end: bool = False
     #: Tilt [deg] applied to every grasp of a free object when no route check
     #: chooses one (``grasp_tilt_deg`` needs the simulator-based checker).
     grasp_tilt_fixed_deg: float = 0.0
@@ -1407,11 +1411,13 @@ class MT3Runner:
         return log
 
     def hold(self) -> dict[str, Any]:
-        """Keep the last command for ``hold_steps`` (objects settling into place)."""
+        """Keep the last command for ``hold_steps`` (objects settling into place),
+        with the gripper open when ``release_at_end``."""
         n0 = self.steps
+        gripper = -1.0 if self.cfg.release_at_end else self._last_gripper
         if self._last_target is not None:
             for _ in range(self.cfg.hold_steps):
-                if not self._send(self._last_target, self._last_gripper):
+                if not self._send(self._last_target, gripper):
                     break
         return self._close({"call": "hold"}, n0, "held")
 
