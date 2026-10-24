@@ -181,6 +181,12 @@ class MT3Config:
     #: Tilt [deg] applied to every grasp of a free object when no route check
     #: chooses one (``grasp_tilt_deg`` needs the simulator-based checker).
     grasp_tilt_fixed_deg: float = 0.0
+    #: Apply ``grasp_tilt_fixed_deg`` only to demos whose source motion did not
+    #: already include a grasp tilt (per-demo ``meta.grasp_tilt_recorded``).
+    grasp_tilt_only_unrecorded: bool = False
+    #: Select a fixed tilt from the episode-start mug/microwave y separation.
+    #: Uses only the frozen/estimated start poses, never live object state.
+    grasp_tilt_by_dy: dict[str, float] = field(default_factory=dict)
     #: Retries of a grasp segment whose object was not picked up.
     grasp_retries: int = 0
     #: Demo retrieval: "nearest" (reference-body distance) or "reach" (most
@@ -280,6 +286,14 @@ def yaw_change(live: np.ndarray, demo: np.ndarray, period: float | None) -> floa
 def offset_recorded(lib: Any, demo: int) -> bool:
     """Whether library ``demo`` was recorded with ``ref_offset`` already applied."""
     flags = getattr(lib, "meta", {}).get("placement_offset_recorded", False)
+    if isinstance(flags, list):
+        return bool(flags[demo]) if demo < len(flags) else False
+    return bool(flags)
+
+
+def grasp_tilt_recorded(lib: Any, demo: int) -> bool:
+    """Whether this demo's recorded grasp motion already includes a tilt."""
+    flags = getattr(lib, "meta", {}).get("grasp_tilt_recorded", False)
     if isinstance(flags, list):
         return bool(flags[demo]) if demo < len(flags) else False
     return bool(flags)
@@ -552,6 +566,8 @@ class EnvHooks:
     body_poses: Callable[[list[str]], dict[str, np.ndarray]]
     #: Whether the episode has ended (success or truncation).
     done: Callable[[], bool]
+    #: Object poses captured at episode start (estimated or GT in development).
+    start_pose: dict[str, np.ndarray] = field(default_factory=dict)
     #: Static feasibility of grip-site paths on a copy of the live scene
     #: (``robots.libero.mt3.feasibility``); None when unavailable.
     check_paths: Callable[..., list[dict[str, Any]]] | None = None
@@ -567,6 +583,12 @@ class MT3Runner:
         self.demo = demo
         self.cfg = cfg
         self.env = env
+        self.start_pose = dict(getattr(env, "start_pose", {}))
+        if self.cfg.grasp_tilt_by_dy:
+            for body, pose in env.body_poses(
+                ["white_yellow_mug_1_main", "microwave_1_main"]
+            ).items():
+                self.start_pose.setdefault(body, pose.copy())
         rows = lib.frames(demo)
         self.first = rows.start
         self.eef = lib.eef[rows]
@@ -1045,10 +1067,35 @@ class MT3Runner:
         if (
             not tilt
             and self.cfg.grasp_tilt_fixed_deg
+            and not (
+                self.cfg.grasp_tilt_only_unrecorded
+                and grasp_tilt_recorded(self.lib, self.demo)
+            )
             and self.gripper[b] <= 0
             and any(e[0] == "grasp" for e in seg.get("events", ()))
         ):
             tilt = np.radians(self.cfg.grasp_tilt_fixed_deg)
+        if (
+            not tilt
+            and self.cfg.grasp_tilt_by_dy
+            and self.gripper[b] <= 0
+            and any(e[0] == "grasp" for e in seg.get("events", ()))
+        ):
+            mug, microwave = (
+                "white_yellow_mug_1_main",
+                "microwave_1_main",
+            )
+            if mug in self.start_pose and microwave in self.start_pose:
+                dy = float(self.start_pose[mug][1, 3] - self.start_pose[microwave][1, 3])
+                angle = next(
+                    (
+                        value
+                        for band, value in self.cfg.grasp_tilt_by_dy.items()
+                        if float(band.split(":")[0]) <= dy < float(band.split(":")[1])
+                    ),
+                    0.0,
+                )
+                tilt = np.radians(angle)
         if tilt:
             transform = tilt_about(
                 transform, tilt, self.eef[c], self.cfg.grasp_tilt_axis
@@ -1065,6 +1112,8 @@ class MT3Runner:
             ),
             "ref_yaw_change_deg": round(float(np.degrees(dyaw)), 1),
         }
+        if tilt:
+            log["tilt"] = round(float(np.degrees(tilt)), 2)
         n0 = self.steps
 
         if self.cfg.mode == "continuous":

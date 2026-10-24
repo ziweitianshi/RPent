@@ -184,10 +184,18 @@ def _hooks(
                     frozen.setdefault(b, pose.copy())
         return poses
 
+    def start_poses(bodies: list[str]) -> dict[str, np.ndarray]:
+        """Return poses captured on first request, before replay changes them."""
+        poses = body_poses(bodies)
+        for body, pose in poses.items():
+            frozen.setdefault(body, pose.copy())
+        return {body: pose.copy() for body, pose in frozen.items() if body in bodies}
+
     return EnvHooks(
         step=primitives._step_env,
         eef_pose=lambda: pose_from_wxyz(env.poses([], [GRIP_SITE])[GRIP_SITE]),
         body_poses=body_poses,
+        start_pose=start_poses(["white_yellow_mug_1_main", "microwave_1_main"]),
         done=lambda: bool(env.terminated or env.truncated),
         check_paths=lambda paths, options=None: env.check_paths(paths, options),
         plan_path=lambda goal: env.plan_path(goal),

@@ -24,6 +24,7 @@ from robots.libero.mt3.core import (
     EnvHooks,
     MT3Config,
     MT3Runner,
+    grasp_tilt_recorded,
     offset_recorded,
     segment_bottleneck,
     tilt_about,
@@ -41,6 +42,44 @@ def test_native_rpent_policy_preserves_seed_method(monkeypatch):
     assert env.seed is seed
     env.seed(9)
     assert calls == [9]
+
+
+def test_grasp_tilt_recorded_metadata_supports_per_demo_flags():
+    lib = SimpleNamespace(meta={"grasp_tilt_recorded": [False, True]})
+    assert not grasp_tilt_recorded(lib, 0)
+    assert grasp_tilt_recorded(lib, 1)
+    assert not grasp_tilt_recorded(lib, 2)
+
+
+def test_grasp_dy_tilt_uses_start_pose_bands():
+    # The scene-start dy is 0.27; the upper adjacent band is selected.
+    poses = {
+        "white_yellow_mug_1_main": np.eye(4),
+        "microwave_1_main": np.eye(4),
+    }
+    poses["white_yellow_mug_1_main"][1, 3] = 0.27
+    hooks = EnvHooks(
+        lambda _: None,
+        lambda: np.eye(4),
+        lambda bodies: {body: poses[body] for body in bodies},
+        lambda: False,
+        start_pose=poses,
+    )
+    cfg = MT3Config(grasp_tilt_by_dy={"0.26:0.30": -15.0})
+    lib = SimpleNamespace(
+        frames=lambda _: slice(0, 1),
+        eef=np.eye(4)[None],
+        target=np.eye(4)[None],
+        gripper=np.zeros(1),
+        actions=np.zeros((1, 7)),
+        segments=[[{"ref": "white_yellow_mug_1_main", "start": 0, "c": 0, "end": 0,
+                    "events": [["grasp", 0, "white_yellow_mug_1_main"]]}]],
+        pose={"white_yellow_mug_1_main": np.eye(4)[None]},
+        meta={},
+    )
+    runner = MT3Runner(lib, 0, cfg, hooks)
+    log = runner._segment(0)
+    assert log["tilt"] == -15.0
 
 
 def test_reference_specific_alignment_replans_preserve_default():
