@@ -115,6 +115,25 @@ def grid_image(rgb: np.ndarray, scale: int = 1, step: int = 64) -> np.ndarray:
     return np.asarray(im)
 
 
+def _usage_limit_delay(stderr: str, now: float | None = None) -> float | None:
+    """Seconds until the reset time of a Codex usage-limit error ("... try again
+    at 2:57 PM"), plus a margin; None for other errors."""
+    import datetime
+
+    if "usage limit" not in stderr:
+        return None
+    match = re.search(r"try again at (\d{1,2}):(\d{2})\s*([AP]M)", stderr)
+    if not match:
+        return 600.0
+    hour, minute = int(match.group(1)) % 12, int(match.group(2))
+    hour += 12 if match.group(3) == "PM" else 0
+    current = datetime.datetime.fromtimestamp(time.time() if now is None else now)
+    reset = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset <= current:
+        reset += datetime.timedelta(days=1)
+    return (reset - current).total_seconds() + 30.0
+
+
 def _parse(text: str) -> dict[str, Any]:
     match = re.search(r"\{.*\}", text, re.S)
     if not match:
@@ -132,6 +151,8 @@ class AstraLocator:
         timeout: float = 300.0,
         task: str = "",
         scale: int = 1,
+        limit_retries: int = 3,
+        max_wait: float = 2700.0,
     ):
         self.model = model
         self.effort = effort
@@ -139,6 +160,10 @@ class AstraLocator:
         self.task = task
         #: Upscaling of the gridded images sent to the model.
         self.scale = scale
+        #: On the account's usage limit, wait until its reset time and retry,
+        #: at most ``limit_retries`` times and ``max_wait`` seconds in total.
+        self.limit_retries = limit_retries
+        self.max_wait = max_wait
         #: One entry per call: categories, answer, tokens, seconds.
         self.calls: list[dict[str, Any]] = []
 
@@ -211,15 +236,23 @@ class AstraLocator:
                 Image.fromarray(grid_image(images[cam], scale=self.scale)).save(path)
                 args += ["-i", str(path)]
             args += ["--", self.prompt(size, cameras, categories)]
-            proc = subprocess.run(
-                args,
-                cwd=tmp,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-                env={**os.environ, "CODEX_HOME": _codex_home()},
-            )
+            waited = 0.0
+            for _ in range(self.limit_retries + 1):
+                proc = subprocess.run(
+                    args,
+                    cwd=tmp,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    env={**os.environ, "CODEX_HOME": _codex_home()},
+                )
+                delay = _usage_limit_delay(proc.stderr) if proc.returncode else None
+                if delay is None or waited + delay > self.max_wait:
+                    break
+                logger.warning("codex usage limit; retrying in %.0f s", delay)
+                time.sleep(delay)
+                waited += delay
             answer_path = Path(tmp, "answer.txt")
             answer = answer_path.read_text() if answer_path.exists() else ""
         usage = None
@@ -235,6 +268,7 @@ class AstraLocator:
             "seconds": round(time.monotonic() - tic, 1),
             "usage": usage,
             "returncode": proc.returncode,
+            "waited_s": round(waited),
         }
         if proc.returncode:
             record["stderr"] = proc.stderr[-300:]

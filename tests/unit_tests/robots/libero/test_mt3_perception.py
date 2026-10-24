@@ -154,3 +154,14 @@ def test_instances_merge_cameras_by_table_plane_distance():
     assert found[1]["pixels"] == {"agentview": [1, 1], "wrist": [2, 2]}
     chosen = assign(["b", "a"], found, {"a": [0.0, 0.0, 0.9], "b": [0.0, 0.4, 0.9]})
     assert chosen["a"] is found[0] and chosen["b"] is found[1]
+
+
+def test_usage_limit_delay_until_reset_time():
+    import datetime
+
+    from robots.libero.mt3.astra import _usage_limit_delay
+
+    now = datetime.datetime(2026, 10, 24, 14, 41, 0).timestamp()
+    err = "ERROR: You've hit your usage limit. ... or try again at 2:57 PM."
+    assert _usage_limit_delay(err, now) == 16 * 60 + 30
+    assert _usage_limit_delay("ERROR: something else", now) is None
