@@ -494,7 +494,9 @@ class LocatedPoses(PerceivedPoses):
     when no camera keeps it, from one batched ``locator`` call for all such
     bodies (at most ``max_calls`` per episode). Each pixel prompts a SAM3 point
     mask; the masks are registered to the body's reference views (MT3 relative
-    registration, see ``refs``) and the median over all pairs is the pose; a body
+    registration, see ``refs``; with ``camera_fallback`` only the first camera of
+    ``cameras`` that yields pairs, each camera against its own references unless
+    ``cross_camera``) and the median over the pairs is the pose; a body
     that is not ``yaw_free`` keeps its nominal ``rotation``. A body whose masks
     moved less than 1 cm since its last estimate keeps that estimate.
     """
@@ -508,13 +510,15 @@ class LocatedPoses(PerceivedPoses):
         cameras: list[str],
         size: int = 512,
         max_calls: int = 3,
-        cross_camera: bool = True,
+        cross_camera: bool = False,
+        camera_fallback: bool = True,
     ):
         super().__init__(env, segmenter, specs, camera=cameras[0], size=size)
         self.locator = locator
         self.cameras = list(cameras)
         self.max_calls = max_calls
         self.cross_camera = cross_camera
+        self.camera_fallback = camera_fallback
         #: Last located world point per segmented body (tracking anchor).
         self.anchor: dict[str, np.ndarray] = {}
         #: Per body: last estimate, its mask medians, and per camera the world
@@ -625,7 +629,12 @@ class LocatedPoses(PerceivedPoses):
             return None
         reg, poses, errors = self.registration, [], 0
         tic = time.monotonic()
-        for cam, mask in masks.items():
+        used = []
+        for cam in [c for c in self.cameras if c in masks]:
+            if poses and self.camera_fallback:
+                break
+            used.append(cam)
+            mask = masks[cam]
             rgb, _, meta, depth_mm = views[cam]
             K = np.asarray(meta["intrinsic_K"], dtype=np.float64)
             T_WC = np.asarray(meta["extrinsic_cam2world"], dtype=np.float64)
@@ -648,6 +657,7 @@ class LocatedPoses(PerceivedPoses):
                     continue
                 poses.append(W4 @ refs["pose"][i])
         info.update(
+            registered=used,
             refs_ok=len(poses),
             refs_failed=errors,
             refs_s=round(time.monotonic() - tic, 2),

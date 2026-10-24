@@ -146,8 +146,12 @@ class MT3Config:
     perception_locator: str = ""
     perception_cameras: list[str] = field(default_factory=lambda: ["agentview"])
     perception_locator_calls: int = 3
-    #: Register each camera's mask to the references of every camera, not only its own.
-    perception_cross_camera: bool = True
+    #: Register each camera's mask to the references of every camera, not only
+    #: its own (worse offline: different viewpoints of partial clouds).
+    perception_cross_camera: bool = False
+    #: Use the first of ``perception_cameras`` that yields a registration (the
+    #: wrist camera only when the agentview one fails), not all of them.
+    perception_camera_fallback: bool = True
     #: Record raw perception next to the simulator poses at the episode start
     #: and stop, without moving (calibration data on non-test scenes).
     perception_calibrate: bool = False

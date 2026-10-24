@@ -117,6 +117,7 @@ def _perceiver(env: Any, cfg: MT3Config) -> Any:
             cfg.perception_cameras,
             max_calls=cfg.perception_locator_calls,
             cross_camera=cfg.perception_cross_camera,
+            camera_fallback=cfg.perception_camera_fallback,
         )
     if cfg.perception_locator:
         raise ValueError(f"unknown perception_locator {cfg.perception_locator!r}")
