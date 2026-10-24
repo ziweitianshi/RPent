@@ -170,7 +170,8 @@ def _hooks(
             poses = {k: pose_from_wxyz(v) for k, v in env.poses(bodies).items()}
         if cfg is not None and cfg.freeze_poses:
             for b, pose in poses.items():
-                frozen.setdefault(b, pose.copy())
+                if cfg.freeze_parts or b.endswith("_main"):
+                    frozen.setdefault(b, pose.copy())
         return poses
 
     return EnvHooks(

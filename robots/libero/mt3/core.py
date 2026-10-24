@@ -164,6 +164,10 @@ class MT3Config:
     #: Estimate every body once, at the first pose query (the episode start),
     #: and answer later queries with those poses (open-loop replay).
     freeze_poses: bool = False
+    #: With ``freeze_poses``, also freeze fixture parts (bodies not named
+    #: ``*_main``: stove knob and burner, drawer, door hinge), whose state the
+    #: robot changes during the episode; False queries them every time.
+    freeze_parts: bool = True
     #: Tilt [deg] applied to every grasp of a free object when no route check
     #: chooses one (``grasp_tilt_deg`` needs the simulator-based checker).
     grasp_tilt_fixed_deg: float = 0.0
