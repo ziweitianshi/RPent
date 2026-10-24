@@ -163,7 +163,7 @@ class AstraLocator:
         #: On the account's usage limit, wait until its reset time and retry,
         #: at most ``limit_retries`` times and ``max_wait`` seconds in total.
         self.limit_retries = limit_retries
-        self.max_wait = max_wait
+        self.max_wait = float(os.environ.get("RPENT_MT3_LOCATOR_MAX_WAIT", max_wait))
         #: One entry per call: categories, answer, tokens, seconds.
         self.calls: list[dict[str, Any]] = []
 
