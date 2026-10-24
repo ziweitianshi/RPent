@@ -507,14 +507,17 @@ class LocatedPoses(PerceivedPoses):
     Every query renders all ``cameras``. A body's pixel in each camera comes from
     tracking (its last located point projected into the image, kept while the
     world point there stays within ``track_tol``: not moved, not hidden) or,
-    when no camera keeps it, from one batched ``locator`` call for all such
-    bodies (at most ``max_calls`` per episode). Each pixel prompts a SAM3 point
-    mask; the masks are registered to the body's reference views (MT3 relative
-    registration, see ``refs``; with ``camera_fallback`` only the first camera of
-    ``cameras`` that yields pairs (text-prompt masks first), each camera against its own references unless
-    ``cross_camera``) and the median over the pairs is the pose; a body
-    that is not ``yaw_free`` keeps its nominal ``rotation``. A body whose masks
-    moved less than 1 cm since its last estimate keeps that estimate.
+    for a body never located, from one batched ``locator`` call for all such
+    bodies (at most ``max_calls`` per episode); a located body that cannot be
+    tracked keeps its last estimate. At each pixel the body's mask is its
+    text-prompt mask containing the pixel (else a SAM3 point mask), dropped when
+    much larger than its reference masks; masks are registered to the body's
+    reference views (MT3 relative registration, see ``refs``), each camera
+    against its own references unless ``cross_camera``, text masks first and,
+    with ``camera_fallback``, cameras in order until one's references agree
+    within ``max_spread``. A body that is not ``yaw_free`` keeps its nominal
+    ``rotation``; a body that did not move (mask median or depth probe within
+    1 cm) keeps its last estimate.
     """
 
     def __init__(
@@ -814,7 +817,10 @@ class LocatedPoses(PerceivedPoses):
         views = self.views()
         target_of = {b: self.specs[b].parent or b for b in bodies}
         pixels = {t: self._track(t, views) for t in set(target_of.values())}
-        lost = [t for t, px in pixels.items() if not px]
+        # A body already located keeps its estimate while it cannot be tracked
+        # (mostly hidden by the arm before its own segment); only bodies never
+        # located go to the locator.
+        lost = [t for t, px in pixels.items() if not px and t not in self.anchor]
         located = self._locate(lost, views) if lost else {}
         for t, px in located.items():
             pixels[t] = px
@@ -826,6 +832,8 @@ class LocatedPoses(PerceivedPoses):
                 if target in located
                 else "tracked"
                 if pixels[target]
+                else "kept"
+                if target in self.anchor
                 else "none"
             }
             pose = (

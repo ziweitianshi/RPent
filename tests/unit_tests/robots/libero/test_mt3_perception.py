@@ -165,3 +165,38 @@ def test_usage_limit_delay_until_reset_time():
     err = "ERROR: You've hit your usage limit. ... or try again at 2:57 PM."
     assert _usage_limit_delay(err, now) == 16 * 60 + 30
     assert _usage_limit_delay("ERROR: something else", now) is None
+
+
+def test_located_body_keeps_estimate_when_tracking_is_lost():
+    from robots.libero.mt3.perception import BodySpec, LocatedPoses
+
+    meta = _camera()
+    world = _world_from_depth(np.full((64, 64), 1.0), meta)
+    spot = world[32, 32]
+    spec = BodySpec(category="box", expect=list(spot))
+    locator = _Locator([32, 32])
+    perceiver = LocatedPoses(
+        None, _Seg(), {"box": spec}, locator, ["agentview"], size=64
+    )
+    ref = make_pose(spot + [0.1, 0.0, 0.0], np.eye(3))
+    perceiver.refs["box"] = {
+        "pose": np.stack([ref]),
+        "rgb": np.zeros((1, 64, 64, 3), np.uint8),
+        "depth_mm": np.zeros((1, 64, 64), np.uint16),
+        "segmap": np.zeros((1, 64, 64), bool),
+        "K": np.stack([np.eye(3)]),
+        "T_WC": np.stack([np.asarray(meta["extrinsic_cam2world"])]),
+        "camera": np.array(["agentview"]),
+    }
+    perceiver.registration = _FakeRegistration(iter([np.linalg.inv(ref) @ np.eye(4)]))
+    rgb = np.zeros((64, 64, 3), np.uint8)
+    depth_mm = np.full((64, 64), 1000, np.uint16)
+    perceiver.views = lambda: {"agentview": (rgb, world, meta, depth_mm)}
+    first = perceiver(["box"])["box"]
+    # The arm now hides the body: the world point at its pixel is 20 cm closer.
+    hidden = _world_from_depth(np.full((64, 64), 0.8), meta)
+    perceiver.views = lambda: {"agentview": (rgb, hidden, meta, depth_mm)}
+    second = perceiver(["box"])["box"]
+    assert np.allclose(second, first)
+    assert len(locator.calls) == 1
+    assert perceiver.log[-1]["source"] == "kept"
