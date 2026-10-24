@@ -495,7 +495,7 @@ class LocatedPoses(PerceivedPoses):
     bodies (at most ``max_calls`` per episode). Each pixel prompts a SAM3 point
     mask; the masks are registered to the body's reference views (MT3 relative
     registration, see ``refs``; with ``camera_fallback`` only the first camera of
-    ``cameras`` that yields pairs, each camera against its own references unless
+    ``cameras`` that yields pairs (text-prompt masks first), each camera against its own references unless
     ``cross_camera``) and the median over the pairs is the pose; a body
     that is not ``yaw_free`` keeps its nominal ``rotation``. A body whose masks
     moved less than 1 cm since its last estimate keeps that estimate.
@@ -512,6 +512,7 @@ class LocatedPoses(PerceivedPoses):
         max_calls: int = 3,
         cross_camera: bool = False,
         camera_fallback: bool = True,
+        max_spread: float = 0.02,
     ):
         super().__init__(env, segmenter, specs, camera=cameras[0], size=size)
         self.locator = locator
@@ -519,6 +520,7 @@ class LocatedPoses(PerceivedPoses):
         self.max_calls = max_calls
         self.cross_camera = cross_camera
         self.camera_fallback = camera_fallback
+        self.max_spread = max_spread
         #: Last located world point per segmented body (tracking anchor).
         self.anchor: dict[str, np.ndarray] = {}
         #: Per body: last estimate, its mask medians, and per camera the world
@@ -593,18 +595,16 @@ class LocatedPoses(PerceivedPoses):
     def _estimate(
         self, body: str, target: str, pixels, views, info
     ) -> np.ndarray | None:
-        medians, masks = {}, {}
-        for cam, (r, c) in pixels.items():
-            rgb, world = views[cam][0], views[cam][1]
-            res = self.segmenter.segment(rgb, point=[int(r), int(c)], min_score=0.0)
-            if not res.found or res.mask is None:
+        medians, masks, kinds = {}, {}, {}
+        for cam, pixel in pixels.items():
+            found = self._target_mask(target, pixel, views[cam])
+            if found is None:
                 continue
-            mask = np.asarray(res.mask, dtype=bool)
-            pts = masked_points(mask, world)
-            if len(pts) < 10:
-                continue
-            masks[cam], medians[cam] = mask, np.median(pts, axis=0)
+            mask, kinds[cam] = found
+            masks[cam] = mask
+            medians[cam] = np.median(masked_points(mask, views[cam][1]), axis=0)
         info["cams"] = sorted(masks)
+        info["masks"] = kinds
         if not masks:
             return None
         self.anchor[target] = next(iter(medians.values()))
@@ -630,7 +630,13 @@ class LocatedPoses(PerceivedPoses):
         reg, poses, errors = self.registration, [], 0
         tic = time.monotonic()
         used = []
-        for cam in [c for c in self.cameras if c in masks]:
+        # Text-prompt masks (as the references were chosen) before point masks,
+        # then camera order.
+        order = sorted(
+            (c for c in self.cameras if c in masks),
+            key=lambda c: (kinds[c] != "text", self.cameras.index(c)),
+        )
+        for cam in order:
             if poses and self.camera_fallback:
                 break
             used.append(cam)
@@ -666,6 +672,9 @@ class LocatedPoses(PerceivedPoses):
             return None
         pose, spread = combine_poses(poses)
         info["refs_spread_cm"] = round(100 * spread, 2)
+        if spread > self.max_spread:
+            # The references disagree: an unreliable registration, not an estimate.
+            return None
         spec = self.specs[body]
         if not spec.yaw_free:
             # Bodies that keep their orientation across scenes: only the position is estimated.
@@ -678,6 +687,52 @@ class LocatedPoses(PerceivedPoses):
             "probes": self._probes(point, views),
         }
         return pose
+
+    def _target_mask(self, target: str, pixel, view) -> tuple[np.ndarray, str] | None:
+        """The body's mask at ``pixel``: among SAM3 masks from the body's text
+        prompts in windows around the pixel (the masks its references were
+        chosen from), the best-scoring one containing the pixel, else the one
+        whose median lies nearest the pixel's world point (within 5 cm); else
+        the SAM3 point mask at the pixel."""
+        rgb, world = view[0], view[1]
+        r, c = int(pixel[0]), int(pixel[1])
+        spec = self.specs[target]
+        prompts = [spec.prompt] if isinstance(spec.prompt, str) else list(spec.prompt)
+        point = world[r, c]
+        best, best_key = None, None
+        for text in [t for t in prompts if t]:
+            for win in [w for w in (spec.window, 2 * spec.window) if w] or [64]:
+                r0, r1 = max(0, r - win), min(rgb.shape[0], r + win)
+                c0, c1 = max(0, c - win), min(rgb.shape[1], c + win)
+                res = self.segmenter.segment(
+                    np.ascontiguousarray(rgb[r0:r1, c0:c1]),
+                    text_prompt=text,
+                    min_score=self.min_score,
+                )
+                if not res.found or res.mask is None:
+                    continue
+                mask = np.zeros(rgb.shape[:2], dtype=bool)
+                mask[r0:r1, c0:c1] = np.asarray(res.mask, dtype=bool)
+                pts = masked_points(mask, world)
+                if len(pts) < 10:
+                    continue
+                dist = (
+                    float(np.linalg.norm(np.median(pts, axis=0) - point))
+                    if np.isfinite(point).all()
+                    else np.inf
+                )
+                # Containing the pixel ranks first, then score; else nearness.
+                key = (1, float(res.score or 0.0)) if mask[r, c] else (0, -dist)
+                if (mask[r, c] or dist < 0.05) and (best_key is None or key > best_key):
+                    best, best_key = mask, key
+        if best is not None:
+            return best, "text"
+        res = self.segmenter.segment(rgb, point=[r, c], min_score=0.0)
+        if res.found and res.mask is not None:
+            mask = np.asarray(res.mask, dtype=bool)
+            if len(masked_points(mask, world)) >= 10:
+                return mask, "point"
+        return None
 
     def _probes(self, point: np.ndarray, views) -> dict[str, np.ndarray]:
         """World point seen at ``point``'s projection, per camera."""
