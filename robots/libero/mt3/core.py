@@ -161,6 +161,9 @@ class MT3Config:
     #: bodies at every pose query (``views/q<NNN>.npz``; data collection on
     #: non-test scenes). Empty: off.
     record_views: list[str] = field(default_factory=list)
+    #: Estimate every body once, at the first pose query (the episode start),
+    #: and answer later queries with those poses (open-loop replay).
+    freeze_poses: bool = False
     #: Tilt [deg] applied to every grasp of a free object when no route check
     #: chooses one (``grasp_tilt_deg`` needs the simulator-based checker).
     grasp_tilt_fixed_deg: float = 0.0

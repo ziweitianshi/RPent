@@ -156,14 +156,22 @@ def _hooks(
     env = primitives.env
 
     queries = [0]
+    frozen: dict[str, np.ndarray] = {}
 
     def body_poses(bodies: list[str]) -> dict[str, np.ndarray]:
+        if cfg is not None and cfg.freeze_poses and all(b in frozen for b in bodies):
+            return {b: frozen[b].copy() for b in bodies}
         if cfg is not None and cfg.record_views:
             _record_views(env, list(bodies), cfg.record_views, queries[0])
             queries[0] += 1
         if perceiver is not None:
-            return perceiver(list(bodies))
-        return {k: pose_from_wxyz(v) for k, v in env.poses(bodies).items()}
+            poses = perceiver(list(bodies))
+        else:
+            poses = {k: pose_from_wxyz(v) for k, v in env.poses(bodies).items()}
+        if cfg is not None and cfg.freeze_poses:
+            for b, pose in poses.items():
+                frozen.setdefault(b, pose.copy())
+        return poses
 
     return EnvHooks(
         step=primitives._step_env,
