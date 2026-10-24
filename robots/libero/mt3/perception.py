@@ -517,7 +517,8 @@ class LocatedPoses(PerceivedPoses):
     with ``camera_fallback``, cameras in order until one's references agree
     within ``max_spread``. A body that is not ``yaw_free`` keeps its nominal
     ``rotation``; a body that did not move (mask median or depth probe within
-    1 cm) keeps its last estimate.
+    1 cm) keeps its last estimate; with ``refresh_parts`` a fixture part is
+    registered again at every query, keeping the more consistent estimate.
     """
 
     def __init__(
@@ -532,6 +533,7 @@ class LocatedPoses(PerceivedPoses):
         cross_camera: bool = False,
         camera_fallback: bool = True,
         max_spread: float = 0.02,
+        refresh_parts: bool = False,
     ):
         super().__init__(env, segmenter, specs, camera=cameras[0], size=size)
         self.locator = locator
@@ -540,6 +542,7 @@ class LocatedPoses(PerceivedPoses):
         self.cross_camera = cross_camera
         self.camera_fallback = camera_fallback
         self.max_spread = max_spread
+        self.refresh_parts = refresh_parts
         self._ref_size: dict[tuple[str, str], tuple[float, float] | None] = {}
         #: Last located world point per segmented body (tracking anchor).
         self.anchor: dict[str, np.ndarray] = {}
@@ -632,16 +635,24 @@ class LocatedPoses(PerceivedPoses):
             return None
         self.anchor[target] = next(iter(medians.values()))
         cached = self._cache.get(body)
-        if cached is not None and (
-            any(
-                np.linalg.norm(medians[cam] - cached["medians"][cam]) < 0.01
-                for cam in medians
-                if cam in cached["medians"]
-            )
-            or any(
-                np.linalg.norm(probe - cached["probes"][cam]) < 0.01
-                for cam, probe in self._probes(cached["point"], views).items()
-                if cam in cached["probes"]
+        # A fixture part is registered again at every query (it starts often
+        # half hidden, e.g. a stove under a pan); other bodies keep an estimate
+        # while they have not moved.
+        refresh = self.refresh_parts and bool(self.specs[body].parent)
+        if (
+            cached is not None
+            and not refresh
+            and (
+                any(
+                    np.linalg.norm(medians[cam] - cached["medians"][cam]) < 0.01
+                    for cam in medians
+                    if cam in cached["medians"]
+                )
+                or any(
+                    np.linalg.norm(probe - cached["probes"][cam]) < 0.01
+                    for cam, probe in self._probes(cached["point"], views).items()
+                    if cam in cached["probes"]
+                )
             )
         ):
             # Unmoved (a probe unchanged even if the gripper now hides part of it).
@@ -711,6 +722,10 @@ class LocatedPoses(PerceivedPoses):
             return None
         pose, spread = chosen
         info["refs_spread_cm"] = round(100 * spread, 2)
+        if refresh and cached is not None and cached["spread"] < spread:
+            # The earlier registration was more consistent: keep it.
+            info["kept_earlier"] = True
+            return cached["pose"]
         spec = self.specs[body]
         if not spec.yaw_free:
             # Bodies that keep their orientation across scenes: only the position is estimated.
@@ -721,6 +736,7 @@ class LocatedPoses(PerceivedPoses):
             "medians": medians,
             "point": point,
             "probes": self._probes(point, views),
+            "spread": spread,
         }
         return pose
 

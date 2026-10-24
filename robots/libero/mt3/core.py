@@ -154,6 +154,9 @@ class MT3Config:
     #: Use the first of ``perception_cameras`` that yields a registration (the
     #: wrist camera only when the agentview one fails), not all of them.
     perception_camera_fallback: bool = True
+    #: Register fixture parts again at every query, keeping the more consistent
+    #: of the new and the earlier estimate (``LocatedPoses.refresh_parts``).
+    perception_refresh_parts: bool = False
     #: Record raw perception next to the simulator poses at the episode start
     #: and stop, without moving (calibration data on non-test scenes).
     perception_calibrate: bool = False

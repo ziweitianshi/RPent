@@ -200,3 +200,51 @@ def test_located_body_keeps_estimate_when_tracking_is_lost():
     assert np.allclose(second, first)
     assert len(locator.calls) == 1
     assert perceiver.log[-1]["source"] == "kept"
+
+
+def test_fixture_part_keeps_the_more_consistent_registration():
+    from robots.libero.mt3.perception import BodySpec, LocatedPoses
+
+    meta = _camera()
+    world = _world_from_depth(np.full((64, 64), 1.0), meta)
+    spot = world[32, 32]
+    specs = {
+        "stove": BodySpec(category="stove", expect=list(spot)),
+        "knob": BodySpec(parent="stove"),
+    }
+    locator = _Locator([32, 32])
+    perceiver = LocatedPoses(
+        None, _Seg(), specs, locator, ["agentview"], size=64, refresh_parts=True
+    )
+    refs = [make_pose(spot + [0.1, 0.0, 0.0], np.eye(3))] * 2
+    perceiver.refs["knob"] = {
+        "pose": np.stack(refs),
+        "rgb": np.zeros((2, 64, 64, 3), np.uint8),
+        "depth_mm": np.zeros((2, 64, 64), np.uint16),
+        "segmap": np.zeros((2, 64, 64), bool),
+        "K": np.stack([np.eye(3)] * 2),
+        "T_WC": np.stack([np.asarray(meta["extrinsic_cam2world"])] * 2),
+        "camera": np.array(["agentview"] * 2),
+    }
+
+    def shifts(*dx):  # registrations landing dx [m] from the spot
+        return [
+            make_pose(spot + [d, 0.0, 0.0], np.eye(3)) @ np.linalg.inv(refs[0])
+            for d in dx
+        ]
+
+    # Query 1: spread 0.5 cm; query 2: spread 0 (better); query 3: spread 1.5 cm.
+    perceiver.registration = _FakeRegistration(
+        iter(shifts(0.0, 0.01) + shifts(0.002, 0.002) + shifts(0.0, 0.03))
+    )
+    rgb = np.zeros((64, 64, 3), np.uint8)
+    depth_mm = np.full((64, 64), 1000, np.uint16)
+    perceiver.views = lambda: {"agentview": (rgb, world, meta, depth_mm)}
+    first = perceiver(["knob"])["knob"]
+    second = perceiver(["knob"])["knob"]
+    third = perceiver(["knob"])["knob"]
+    assert np.allclose(first[:3, 3], spot + [0.005, 0.0, 0.0], atol=1e-9)
+    assert np.allclose(second[:3, 3], spot + [0.002, 0.0, 0.0], atol=1e-9)
+    assert np.allclose(third, second)
+    assert perceiver.log[-1].get("kept_earlier")
+    assert len(locator.calls) == 1
