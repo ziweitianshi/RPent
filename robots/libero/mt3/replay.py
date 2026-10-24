@@ -113,7 +113,9 @@ def _perceiver(env: Any, cfg: MT3Config) -> Any:
             env,
             segmenter,
             parse_specs(cfg.perception),
-            AstraLocator(task=env.get_task_language()),
+            AstraLocator(
+                model=cfg.perception_locator_model, task=env.get_task_language()
+            ),
             cfg.perception_cameras,
             max_calls=cfg.perception_locator_calls,
             cross_camera=cfg.perception_cross_camera,

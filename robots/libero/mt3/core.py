@@ -146,6 +146,8 @@ class MT3Config:
     perception_locator: str = ""
     perception_cameras: list[str] = field(default_factory=lambda: ["agentview"])
     perception_locator_calls: int = 3
+    #: Model of the locator (Codex model id).
+    perception_locator_model: str = "gpt-6-astra"
     #: Register each camera's mask to the references of every camera, not only
     #: its own (worse offline: different viewpoints of partial clouds).
     perception_cross_camera: bool = False
