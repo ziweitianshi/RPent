@@ -77,6 +77,13 @@ class BodySpec:
     #: ``K``, ``T_WC``, ``pose`` of training frames); MT3 relative registration
     #: against them when set, ahead of ``model``.
     refs: str = ""
+    #: Object category and its description for a locator model (``LocatedPoses``);
+    #: bodies sharing a category are told apart by ``expect``.
+    category: str = ""
+    describe: str = ""
+    #: A tracked pixel is kept while its world point lies within this distance [m]
+    #: of the body's last located point (not moved, not hidden).
+    track_tol: float = 0.06
 
 
 def parse_specs(raw: dict[str, Any]) -> dict[str, BodySpec]:
@@ -162,23 +169,35 @@ class MT3Registration:
         st.crop_object_using_segmap()
         return st
 
-    def transfer(self, demo, live, T_WC: np.ndarray, pivot: np.ndarray) -> np.ndarray:
+    def transfer(
+        self,
+        demo,
+        live,
+        T_WC: np.ndarray,
+        pivot: np.ndarray,
+        T_WC_demo: np.ndarray | None = None,
+    ) -> np.ndarray:
         """``W_T_delta_4dof`` taking the demo scene's object onto the live one
-        (both seen by the camera ``T_WC``), rotated about ``pivot``."""
+        (seen by the camera ``T_WC``; the demo by ``T_WC_demo``, default the
+        same), rotated about ``pivot``."""
+        T_WC_demo = T_WC if T_WC_demo is None else T_WC_demo
         if self.pnet is None:
             self.pnet = self._regressor(
                 filter_pointcloud=True,
                 n_points=2048,
                 T_WC=T_WC,
-                T_WC_demo=T_WC,
+                T_WC_demo=T_WC_demo,
                 depth_units="mm",
                 device=self.device,
             )
-        self.pnet.extrinsics = self.pnet.extrinsics_demo = T_WC
+        self.pnet.extrinsics, self.pnet.extrinsics_demo = T_WC, T_WC_demo
         W_T = self.pnet.estimate_relative_pose(
             scene1_state=demo, scene2_state=live, visualise_pcds=False, verbose=False
         )
         C_T = np.linalg.inv(T_WC) @ W_T @ T_WC
+        # The original different-camera path moves the demo points into the
+        # live camera frame first.
+        demo.T_WC, live.T_WC = T_WC_demo, T_WC
         C_ref = self.gicp.refine_relative_pose(
             scene1_state=demo,
             scene2_state=live,
@@ -186,6 +205,7 @@ class MT3Registration:
             T_delta_init=C_T,
             verbose=False,
             visualise_pcds=False,
+            different_cameras_live_demo=not np.allclose(T_WC_demo, T_WC),
         )
         W_ref = T_WC @ C_ref @ np.linalg.inv(T_WC)
         # deploy_mt3 rotates about the gripper tip, 0.24 m along the Sawyer wrist z;
@@ -208,6 +228,32 @@ def render_view(
     depth = _metric_depth(depth, meta)[::-1]
     world = _world_from_depth(depth, meta)
     return np.ascontiguousarray(np.asarray(rgb)[::-1]), world, meta, depth
+
+
+def combine_poses(poses: list[np.ndarray]) -> tuple[np.ndarray, float]:
+    """Median position and consensus yaw (the sample nearest all others) of
+    pose estimates, with the median distance [m] of the positions to the median."""
+    pos = np.stack([p[:3, 3] for p in poses])
+    yaws = np.array([np.arctan2(p[1, 0], p[0, 0]) for p in poses])
+    mid = np.median(pos, axis=0)
+    spread = [np.abs(np.angle(np.exp(1j * (yaws - y)))).sum() for y in yaws]
+    pose = poses[int(np.argmin(spread))].copy()
+    pose[:3, 3] = mid
+    return pose, float(np.median(np.linalg.norm(pos - mid, axis=1)))
+
+
+def project(
+    meta: dict[str, Any], point: np.ndarray, size: int
+) -> tuple[int, int] | None:
+    """Pixel (row, col) of a world point in an upright image, or None outside it."""
+    K = np.asarray(meta["intrinsic_K"], dtype=float)
+    T = np.asarray(meta["extrinsic_cam2world"], dtype=float)
+    cam = (np.asarray(point, dtype=float) - T[:3, 3]) @ T[:3, :3]
+    if cam[2] <= 0:
+        return None
+    u, v, w = K @ cam
+    r, c = int(round(v / w)), int(round(u / w))
+    return (r, c) if 0 <= r < size and 0 <= c < size else None
 
 
 def quat_wxyz_to_matrix(quat: list[float]) -> np.ndarray:
@@ -406,19 +452,8 @@ class PerceivedPoses:
         )
         if not poses:
             return None
-        pos = np.stack([p[:3, 3] for p in poses])
-        yaws = np.array([np.arctan2(p[1, 0], p[0, 0]) for p in poses])
-        mid = np.median(pos, axis=0)
-        # Circular median of the yaw: the sample nearest all others.
-        spread = [np.abs(np.angle(np.exp(1j * (yaws - y)))).sum() for y in yaws]
-        k = int(np.argmin(spread))
-        pose = poses[k].copy()
-        pose[:3, 3] = mid
-        info.update(
-            refs_spread_cm=round(
-                100 * float(np.median(np.linalg.norm(pos - mid, axis=1))), 2
-            )
-        )
+        pose, spread = combine_poses(poses)
+        info.update(refs_spread_cm=round(100 * spread, 2))
         return pose
 
     def __call__(self, bodies: list[str]) -> dict[str, np.ndarray]:
@@ -441,6 +476,204 @@ class PerceivedPoses:
                 pose = self.last.get(body)
             if pose is None:
                 # Never seen: the expected pose.
+                pose = np.eye(4)
+                pose[:3, :3] = quat_wxyz_to_matrix(spec.rotation)
+                pose[:3, 3] = np.asarray(spec.expect or [0.0, 0.0, 0.0])
+            self.last[body] = pose
+            poses[body] = pose
+            self.log.append({"body": body, "found": found, **info})
+        return poses
+
+
+class LocatedPoses(PerceivedPoses):
+    """Poses from several cameras, with objects identified by a locator model.
+
+    Every query renders all ``cameras``. A body's pixel in each camera comes from
+    tracking (its last located point projected into the image, kept while the
+    world point there stays within ``track_tol``: not moved, not hidden) or,
+    when no camera keeps it, from one batched ``locator`` call for all such
+    bodies (at most ``max_calls`` per episode). Each pixel prompts a SAM3 point
+    mask; the masks are registered to the body's reference views (MT3 relative
+    registration, see ``refs``) and the median over all pairs is the pose; a body
+    that is not ``yaw_free`` keeps its nominal ``rotation``. A body whose masks
+    moved less than 1 cm since its last estimate keeps that estimate.
+    """
+
+    def __init__(
+        self,
+        env: Any,
+        segmenter: Any,
+        specs: dict[str, BodySpec],
+        locator: Any,
+        cameras: list[str],
+        size: int = 512,
+        max_calls: int = 3,
+        cross_camera: bool = True,
+    ):
+        super().__init__(env, segmenter, specs, camera=cameras[0], size=size)
+        self.locator = locator
+        self.cameras = list(cameras)
+        self.max_calls = max_calls
+        self.cross_camera = cross_camera
+        #: Last located world point per segmented body (tracking anchor).
+        self.anchor: dict[str, np.ndarray] = {}
+        #: Per body: last estimate and the mask medians it came from.
+        self._cache: dict[str, tuple[np.ndarray, dict[str, np.ndarray]]] = {}
+
+    def views(
+        self,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray, dict[str, Any], np.ndarray]]:
+        out = {}
+        for cam in self.cameras:
+            rgb, world, meta, depth = render_view(self.env, cam, self.size)
+            depth_mm = np.round(1000 * np.nan_to_num(depth)).astype(np.uint16)
+            out[cam] = (rgb, world, meta, depth_mm)
+        return out
+
+    def _track(self, target: str, views) -> dict[str, list[int]]:
+        if target not in self.anchor:
+            return {}
+        tol = self.specs[target].track_tol
+        pixels = {}
+        for cam, (_, world, meta, _) in views.items():
+            px = project(meta, self.anchor[target], self.size)
+            if px is None:
+                continue
+            xyz = world[px]
+            if (
+                np.isfinite(xyz).all()
+                and np.linalg.norm(xyz - self.anchor[target]) < tol
+            ):
+                pixels[cam] = list(px)
+        return pixels
+
+    def _locate(self, targets: list[str], views) -> dict[str, dict[str, list[int]]]:
+        from robots.libero.mt3.astra import assign, instances
+
+        cats: dict[str, str] = {}
+        for t in targets:
+            spec = self.specs[t]
+            if spec.category:
+                cats[spec.category] = spec.describe or spec.category.replace("_", " ")
+        if (
+            not cats
+            or self.locator is None
+            or len(self.locator.calls) >= self.max_calls
+        ):
+            return {}
+        answer = self.locator.locate({c: v[0] for c, v in views.items()}, cats)
+        worlds = {c: v[1] for c, v in views.items()}
+        found: dict[str, dict[str, list[int]]] = {}
+        for cat in cats:
+            # Every body of the category takes part, so instances go to the right one.
+            members = [b for b, s in self.specs.items() if s.category == cat]
+            expect = {
+                b: self.anchor[b] if b in self.anchor else self.specs[b].expect
+                for b in members
+            }
+            for body, inst in assign(
+                members, instances(answer.get(cat, {}), worlds), expect
+            ).items():
+                if body in targets:
+                    found[body] = inst["pixels"]
+        return found
+
+    def _estimate(
+        self, body: str, target: str, pixels, views, info
+    ) -> np.ndarray | None:
+        medians, masks = {}, {}
+        for cam, (r, c) in pixels.items():
+            rgb, world = views[cam][0], views[cam][1]
+            res = self.segmenter.segment(rgb, point=[int(r), int(c)], min_score=0.0)
+            if not res.found or res.mask is None:
+                continue
+            mask = np.asarray(res.mask, dtype=bool)
+            pts = masked_points(mask, world)
+            if len(pts) < 10:
+                continue
+            masks[cam], medians[cam] = mask, np.median(pts, axis=0)
+        info["cams"] = sorted(masks)
+        if not masks:
+            return None
+        self.anchor[target] = next(iter(medians.values()))
+        cached = self._cache.get(body)
+        if cached is not None and any(
+            cam in cached[1] and np.linalg.norm(medians[cam] - cached[1][cam]) < 0.01
+            for cam in medians
+        ):
+            info["reused"] = True
+            return cached[0]
+        refs = self.refs.get(body)
+        if refs is None or self.registration is None:
+            return None
+        reg, poses, errors = self.registration, [], 0
+        tic = time.monotonic()
+        for cam, mask in masks.items():
+            rgb, _, meta, depth_mm = views[cam]
+            K = np.asarray(meta["intrinsic_K"], dtype=np.float64)
+            T_WC = np.asarray(meta["extrinsic_cam2world"], dtype=np.float64)
+            for i in range(len(refs["pose"])):
+                if not self.cross_camera and str(refs["camera"][i]) != cam:
+                    continue
+                try:
+                    live = reg.scene(rgb, depth_mm, mask, K)
+                    demo = reg.scene(
+                        refs["rgb"][i],
+                        refs["depth_mm"][i],
+                        refs["segmap"][i],
+                        refs["K"][i],
+                    )
+                    W4 = reg.transfer(
+                        demo, live, T_WC, refs["pose"][i][:3, 3], refs["T_WC"][i]
+                    )
+                except Exception:  # noqa: BLE001 -- e.g. too few points; skip this pair
+                    errors += 1
+                    continue
+                poses.append(W4 @ refs["pose"][i])
+        info.update(
+            refs_ok=len(poses),
+            refs_failed=errors,
+            refs_s=round(time.monotonic() - tic, 2),
+        )
+        if not poses:
+            return None
+        pose, spread = combine_poses(poses)
+        info["refs_spread_cm"] = round(100 * spread, 2)
+        spec = self.specs[body]
+        if not spec.yaw_free:
+            # Bodies that keep their orientation across scenes: only the position is estimated.
+            pose[:3, :3] = quat_wxyz_to_matrix(spec.rotation)
+        self._cache[body] = (pose, medians)
+        return pose
+
+    def __call__(self, bodies: list[str]) -> dict[str, np.ndarray]:
+        views = self.views()
+        target_of = {b: self.specs[b].parent or b for b in bodies}
+        pixels = {t: self._track(t, views) for t in set(target_of.values())}
+        lost = [t for t, px in pixels.items() if not px]
+        located = self._locate(lost, views) if lost else {}
+        for t, px in located.items():
+            pixels[t] = px
+        poses: dict[str, np.ndarray] = {}
+        for body in bodies:
+            target = target_of[body]
+            info: dict[str, Any] = {
+                "source": "located"
+                if target in located
+                else "tracked"
+                if pixels[target]
+                else "none"
+            }
+            pose = (
+                self._estimate(body, target, pixels[target], views, info)
+                if pixels[target]
+                else None
+            )
+            found = pose is not None
+            if not found:
+                pose = self.last.get(body)
+            if pose is None:
+                spec = self.specs[body]
                 pose = np.eye(4)
                 pose[:3, :3] = quat_wxyz_to_matrix(spec.rotation)
                 pose[:3, 3] = np.asarray(spec.expect or [0.0, 0.0, 0.0])

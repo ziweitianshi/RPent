@@ -47,7 +47,7 @@ class _FakeRegistration:
     def scene(self, *args):
         return None
 
-    def transfer(self, demo, live, T_WC, pivot):
+    def transfer(self, demo, live, T_WC, pivot, T_WC_demo=None):
         return next(self.deltas)
 
 
@@ -75,3 +75,62 @@ def test_refs_median_rejects_an_outlier_reference():
     assert np.allclose(pose[:3, 3], live[:3, 3], atol=1e-9)
     assert np.allclose(pose[:3, :3], live[:3, :3], atol=1e-9)
     assert info["refs_ok"] == n and info["refs_failed"] == 0
+
+
+class _Seg:
+    def segment(self, rgb, point, min_score):
+        mask = np.zeros(rgb.shape[:2], bool)
+        r, c = point
+        mask[max(0, r - 3) : r + 4, max(0, c - 3) : c + 4] = True
+        return type("R", (), {"found": True, "mask": mask, "score": 1.0})()
+
+
+class _Locator:
+    def __init__(self, pixel):
+        self.pixel = pixel
+        self.calls = []
+
+    def locate(self, images, categories):
+        self.calls.append({"categories": list(categories)})
+        return {cat: {"agentview": [self.pixel]} for cat in categories}
+
+
+def test_located_poses_locates_once_then_tracks():
+    from robots.libero.mt3.perception import BodySpec, LocatedPoses
+
+    meta = _camera()
+    depth = np.full((64, 64), 1.0)
+    world = _world_from_depth(depth, meta)
+    pixel = [32, 32]
+    spot = world[32, 32]
+    live = make_pose(spot, rz(0.3))
+    spec = BodySpec(category="box", expect=list(spot), rotation=[1.0, 0.0, 0.0, 0.0])
+    locator = _Locator(pixel)
+    perceiver = LocatedPoses(
+        None, _Seg(), {"box": spec}, locator, ["agentview"], size=64
+    )
+    ref = make_pose(spot + [0.1, 0.0, 0.0], np.eye(3))
+    perceiver.refs["box"] = {
+        "pose": np.stack([ref]),
+        "rgb": np.zeros((1, 64, 64, 3), np.uint8),
+        "depth_mm": np.zeros((1, 64, 64), np.uint16),
+        "segmap": np.zeros((1, 64, 64), bool),
+        "K": np.stack([np.eye(3)]),
+        "T_WC": np.stack([np.asarray(meta["extrinsic_cam2world"])]),
+        "camera": np.array(["agentview"]),
+    }
+    perceiver.registration = _FakeRegistration(iter([live @ np.linalg.inv(ref)] * 2))
+    rgb = np.zeros((64, 64, 3), np.uint8)
+    depth_mm = np.full((64, 64), 1000, np.uint16)
+    perceiver.views = lambda: {"agentview": (rgb, world, meta, depth_mm)}
+
+    first = perceiver(["box"])["box"]
+    assert np.allclose(first[:3, 3], spot, atol=1e-9)
+    # Not yaw_free: the nominal rotation, not the registered yaw.
+    assert np.allclose(first[:3, :3], np.eye(3))
+    second = perceiver(["box"])["box"]
+    assert np.allclose(second, first)
+    assert len(locator.calls) == 1
+    assert [e["source"] for e in perceiver.log] == ["located", "tracked"]
+    assert perceiver.log[0]["found"] and perceiver.log[0]["refs_ok"] == 1
+    assert perceiver.log[1].get("reused")

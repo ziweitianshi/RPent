@@ -104,9 +104,23 @@ def _perceiver(env: Any, cfg: MT3Config) -> Any:
         raise ValueError(
             "pose_source=perception needs perception_endpoint or $RPENT_MT3_SAM3_ENDPOINT"
         )
-    return PerceivedPoses(
-        env, Sam3Client(make_rpc_client(endpoint)), parse_specs(cfg.perception)
-    )
+    segmenter = Sam3Client(make_rpc_client(endpoint))
+    if cfg.perception_locator == "astra":
+        from robots.libero.mt3.astra import AstraLocator
+        from robots.libero.mt3.perception import LocatedPoses
+
+        return LocatedPoses(
+            env,
+            segmenter,
+            parse_specs(cfg.perception),
+            AstraLocator(task=env.get_task_language()),
+            cfg.perception_cameras,
+            max_calls=cfg.perception_locator_calls,
+            cross_camera=cfg.perception_cross_camera,
+        )
+    if cfg.perception_locator:
+        raise ValueError(f"unknown perception_locator {cfg.perception_locator!r}")
+    return PerceivedPoses(env, segmenter, parse_specs(cfg.perception))
 
 
 def _record_views(env: Any, bodies: list[str], cameras: list[str], index: int) -> None:
@@ -292,6 +306,7 @@ def run_mt3(
         "calls": runner.logs,
         "pose_source": cfg.pose_source,
         "perception_log": perceiver.log if perceiver is not None else None,
+        "locator_calls": getattr(getattr(perceiver, "locator", None), "calls", None),
         "steps": runner.steps,
         "success": bool(toolkit.solved()),
         "terminated": bool(toolkit.primitives.env.terminated),

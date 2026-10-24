@@ -139,6 +139,15 @@ class MT3Config:
     perception: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: SAM3 service for ``pose_source: perception`` (else $RPENT_MT3_SAM3_ENDPOINT).
     perception_endpoint: str = ""
+    #: "astra": bodies are identified by gpt-6-astra (``astra.py``) in all
+    #: ``perception_cameras``, then tracked (``perception.LocatedPoses``);
+    #: at most ``perception_locator_calls`` model calls per episode. Empty: SAM3
+    #: text prompts on the agentview camera.
+    perception_locator: str = ""
+    perception_cameras: list[str] = field(default_factory=lambda: ["agentview"])
+    perception_locator_calls: int = 3
+    #: Register each camera's mask to the references of every camera, not only its own.
+    perception_cross_camera: bool = True
     #: Record raw perception next to the simulator poses at the episode start
     #: and stop, without moving (calibration data on non-test scenes).
     perception_calibrate: bool = False
