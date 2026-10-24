@@ -573,8 +573,14 @@ class LocatedPoses(PerceivedPoses):
                 b: self.anchor[b] if b in self.anchor else self.specs[b].expect
                 for b in members
             }
+            # A category with one body is one instance whatever face each camera saw.
+            merge = (
+                np.inf
+                if len(members) == 1
+                else max(0.08, *(self.specs[b].track_tol for b in members))
+            )
             for body, inst in assign(
-                members, instances(answer.get(cat, {}), worlds), expect
+                members, instances(answer.get(cat, {}), worlds, merge), expect
             ).items():
                 if body in targets:
                     found[body] = inst["pixels"]

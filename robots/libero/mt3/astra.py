@@ -270,12 +270,14 @@ class AstraLocator:
 def instances(
     pixels: dict[str, list[list[int]]],
     worlds: dict[str, np.ndarray],
-    merge: float = 0.06,
+    merge: float = 0.08,
 ) -> list[dict[str, Any]]:
     """Group a category's pixels (all cameras) into instances by their world points.
 
-    Pixels whose back-projected points lie within ``merge`` [m] of an instance's
-    first point join it. Returns ``[{"xyz": centroid, "pixels": {camera: [r, c]}}]``.
+    A pixel joins the nearest instance not yet seen by its camera whose first
+    point lies within ``merge`` [m] in the table plane (cameras see different
+    faces: a side from the front, the top from the wrist), else starts one.
+    Returns ``[{"xyz": centroid, "pixels": {camera: [r, c]}}]``.
     """
     found: list[dict[str, Any]] = []
     for cam, pts in pixels.items():
@@ -283,14 +285,16 @@ def instances(
             xyz = np.asarray(worlds[cam][r, c], dtype=float)
             if not np.isfinite(xyz).all():
                 continue
-            for inst in found:
-                if (
-                    cam not in inst["pixels"]
-                    and np.linalg.norm(inst["points"][0] - xyz) < merge
-                ):
-                    inst["pixels"][cam] = [r, c]
-                    inst["points"].append(xyz)
-                    break
+            dist = [
+                np.linalg.norm(inst["points"][0][:2] - xyz[:2])
+                if cam not in inst["pixels"]
+                else np.inf
+                for inst in found
+            ]
+            if dist and min(dist) < merge:
+                inst = found[int(np.argmin(dist))]
+                inst["pixels"][cam] = [r, c]
+                inst["points"].append(xyz)
             else:
                 found.append({"pixels": {cam: [r, c]}, "points": [xyz]})
     for inst in found:

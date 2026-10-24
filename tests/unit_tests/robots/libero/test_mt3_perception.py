@@ -134,3 +134,23 @@ def test_located_poses_locates_once_then_tracks():
     assert [e["source"] for e in perceiver.log] == ["located", "tracked"]
     assert perceiver.log[0]["found"] and perceiver.log[0]["refs_ok"] == 1
     assert perceiver.log[1].get("reused")
+
+
+def test_instances_merge_cameras_by_table_plane_distance():
+    from robots.libero.mt3.astra import assign, instances
+
+    front = np.zeros((4, 4, 3))
+    wrist = np.zeros((4, 4, 3))
+    front[0, 0] = [0.0, 0.0, 0.95]  # side of pot A
+    front[1, 1] = [0.0, 0.40, 0.95]  # side of pot B
+    wrist[2, 2] = [0.02, 0.41, 1.05]  # lid of pot B, 10 cm higher
+    wrist[3, 3] = [0.01, 0.01, 1.05]  # lid of pot A
+    found = instances(
+        {"agentview": [[0, 0], [1, 1]], "wrist": [[2, 2], [3, 3]]},
+        {"agentview": front, "wrist": wrist},
+    )
+    assert len(found) == 2
+    assert found[0]["pixels"] == {"agentview": [0, 0], "wrist": [3, 3]}
+    assert found[1]["pixels"] == {"agentview": [1, 1], "wrist": [2, 2]}
+    chosen = assign(["b", "a"], found, {"a": [0.0, 0.0, 0.9], "b": [0.0, 0.4, 0.9]})
+    assert chosen["a"] is found[0] and chosen["b"] is found[1]
