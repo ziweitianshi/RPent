@@ -195,6 +195,21 @@ class MT3Registration:
         return self.bias(W_T_delta_6dof=W_ref, T_WE=T_WE)
 
 
+def render_view(
+    env: Any, camera: str, size: int
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any], np.ndarray]:
+    """Upright RGB, world map, camera metadata and metric depth of one camera."""
+    from robots.libero.tools import _metric_depth, _world_from_depth
+
+    rgb, depth = env.render_camera(
+        camera_name=camera, height=size, width=size, depth=True
+    )
+    meta = env.get_camera_meta(camera, size, size)
+    depth = _metric_depth(depth, meta)[::-1]
+    world = _world_from_depth(depth, meta)
+    return np.ascontiguousarray(np.asarray(rgb)[::-1]), world, meta, depth
+
+
 def quat_wxyz_to_matrix(quat: list[float]) -> np.ndarray:
     return Rotation.from_quat(np.roll(np.asarray(quat, dtype=float), -1)).as_matrix()
 
@@ -279,15 +294,8 @@ class PerceivedPoses:
 
     def frame(self) -> tuple[np.ndarray, np.ndarray]:
         """RGB (H x W x 3) and world map (H x W x 3), both upright."""
-        from robots.libero.tools import _metric_depth, _world_from_depth
-
-        rgb, depth = self.env.render_camera(
-            camera_name=self.camera, height=self.size, width=self.size, depth=True
-        )
-        meta = self.env.get_camera_meta(self.camera, self.size, self.size)
-        self.camera_meta = meta
-        world = _world_from_depth(_metric_depth(depth, meta)[::-1], meta)
-        return np.ascontiguousarray(np.asarray(rgb)[::-1]), world
+        rgb, world, self.camera_meta, _ = render_view(self.env, self.camera, self.size)
+        return rgb, world
 
     def segment(
         self,

@@ -109,13 +109,41 @@ def _perceiver(env: Any, cfg: MT3Config) -> Any:
     )
 
 
+def _record_views(env: Any, bodies: list[str], cameras: list[str], index: int) -> None:
+    """Save each camera's RGB, depth [mm] and metadata with the simulator poses
+    of ``bodies`` and the gripper (data collection, see ``record_views``)."""
+    from robots.libero.mt3.perception import render_view
+
+    out = Path(get_output_dir()) / "views"
+    out.mkdir(exist_ok=True)
+    arrays: dict[str, Any] = {}
+    meta: dict[str, Any] = {"bodies": bodies, "cameras": cameras}
+    for camera in cameras:
+        rgb, _, cam_meta, depth = render_view(env, camera, 512)
+        arrays[f"{camera}/rgb"] = rgb
+        arrays[f"{camera}/depth_mm"] = np.round(1000 * np.nan_to_num(depth)).astype(
+            np.uint16
+        )
+        meta[camera] = {k: cam_meta[k] for k in ("intrinsic_K", "extrinsic_cam2world")}
+    poses = env.poses(bodies, [GRIP_SITE])
+    for name, values in poses.items():
+        arrays[f"pose/{name}"] = pose_from_wxyz(values)
+    arrays["meta"] = json.dumps(meta)
+    np.savez_compressed(out / f"q{index:03d}.npz", **arrays)
+
+
 def _hooks(
     toolkit: Any, cfg: MT3Config | None = None, perceiver: Any = None
 ) -> EnvHooks:
     primitives = toolkit.primitives
     env = primitives.env
 
+    queries = [0]
+
     def body_poses(bodies: list[str]) -> dict[str, np.ndarray]:
+        if cfg is not None and cfg.record_views:
+            _record_views(env, list(bodies), cfg.record_views, queries[0])
+            queries[0] += 1
         if perceiver is not None:
             return perceiver(list(bodies))
         return {k: pose_from_wxyz(v) for k, v in env.poses(bodies).items()}
