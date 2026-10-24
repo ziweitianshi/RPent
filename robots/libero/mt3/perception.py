@@ -230,6 +230,22 @@ def render_view(
     return np.ascontiguousarray(np.asarray(rgb)[::-1]), world, meta, depth
 
 
+def mask_extent(
+    mask: np.ndarray, depth_mm: np.ndarray, K: np.ndarray, cam2world: np.ndarray
+) -> tuple[float, float] | None:
+    """Horizontal diagonal and height [m] of a mask's back-projected points."""
+    rows, cols = np.nonzero(mask & (depth_mm > 0))
+    if len(rows) < 10:
+        return None
+    z = depth_mm[rows, cols] / 1000.0
+    cam = np.stack(
+        [(cols - K[0, 2]) * z / K[0, 0], (rows - K[1, 2]) * z / K[1, 1], z], 1
+    )
+    pts = cam @ cam2world[:3, :3].T + cam2world[:3, 3]
+    lo, hi = np.percentile(pts, 2, axis=0), np.percentile(pts, 98, axis=0)
+    return float(np.hypot(*(hi - lo)[:2])), float((hi - lo)[2])
+
+
 def combine_poses(poses: list[np.ndarray]) -> tuple[np.ndarray, float]:
     """Median position and consensus yaw (the sample nearest all others) of
     pose estimates, with the median distance [m] of the positions to the median."""
@@ -521,6 +537,7 @@ class LocatedPoses(PerceivedPoses):
         self.cross_camera = cross_camera
         self.camera_fallback = camera_fallback
         self.max_spread = max_spread
+        self._ref_size: dict[tuple[str, str], tuple[float, float] | None] = {}
         #: Last located world point per segmented body (tracking anchor).
         self.anchor: dict[str, np.ndarray] = {}
         #: Per body: last estimate, its mask medians, and per camera the world
@@ -600,6 +617,9 @@ class LocatedPoses(PerceivedPoses):
             found = self._target_mask(target, pixel, views[cam])
             if found is None:
                 continue
+            if not self._plausible_size(body, cam, found[0], views[cam]):
+                info.setdefault("rejected_size", []).append(cam)
+                continue
             mask, kinds[cam] = found
             masks[cam] = mask
             medians[cam] = np.median(masked_points(mask, views[cam][1]), axis=0)
@@ -636,10 +656,12 @@ class LocatedPoses(PerceivedPoses):
             (c for c in self.cameras if c in masks),
             key=lambda c: (kinds[c] != "text", self.cameras.index(c)),
         )
+        chosen, spreads = None, {}
         for cam in order:
-            if poses and self.camera_fallback:
+            if chosen is not None:
                 break
             used.append(cam)
+            cam_poses: list[np.ndarray] = []
             mask = masks[cam]
             rgb, _, meta, depth_mm = views[cam]
             K = np.asarray(meta["intrinsic_K"], dtype=np.float64)
@@ -661,20 +683,31 @@ class LocatedPoses(PerceivedPoses):
                 except Exception:  # noqa: BLE001 -- e.g. too few points; skip this pair
                     errors += 1
                     continue
-                poses.append(W4 @ refs["pose"][i])
+                cam_poses.append(W4 @ refs["pose"][i])
+            poses += cam_poses
+            if self.camera_fallback and cam_poses:
+                # A camera whose references disagree gives way to the next one.
+                estimate, spread = combine_poses(cam_poses)
+                spreads[cam] = round(100 * spread, 2)
+                if spread <= self.max_spread:
+                    chosen = (estimate, spread)
+        if not self.camera_fallback and poses:
+            estimate, spread = combine_poses(poses)
+            spreads["all"] = round(100 * spread, 2)
+            if spread <= self.max_spread:
+                chosen = (estimate, spread)
         info.update(
             registered=used,
+            spread_cm=spreads,
             refs_ok=len(poses),
             refs_failed=errors,
             refs_s=round(time.monotonic() - tic, 2),
         )
-        if not poses:
+        if chosen is None:
+            # No camera's references agree: an unreliable registration, not an estimate.
             return None
-        pose, spread = combine_poses(poses)
+        pose, spread = chosen
         info["refs_spread_cm"] = round(100 * spread, 2)
-        if spread > self.max_spread:
-            # The references disagree: an unreliable registration, not an estimate.
-            return None
         spec = self.specs[body]
         if not spec.yaw_free:
             # Bodies that keep their orientation across scenes: only the position is estimated.
@@ -687,6 +720,40 @@ class LocatedPoses(PerceivedPoses):
             "probes": self._probes(point, views),
         }
         return pose
+
+    def _plausible_size(self, body: str, cam: str, mask: np.ndarray, view) -> bool:
+        """False for a mask much larger than every reference mask of the body in
+        this camera (another, bigger object seen at the located pixel)."""
+        refs = self.refs.get(body)
+        if refs is None:
+            return True
+        key = (body, cam)
+        if key not in self._ref_size:
+            sizes = [
+                mask_extent(
+                    refs["segmap"][i],
+                    refs["depth_mm"][i],
+                    refs["K"][i],
+                    refs["T_WC"][i],
+                )
+                for i in range(len(refs["pose"]))
+                if str(refs["camera"][i]) == cam
+            ]
+            sizes = [x for x in sizes if x is not None]
+            self._ref_size[key] = (
+                (max(x[0] for x in sizes), max(x[1] for x in sizes)) if sizes else None
+            )
+        ref = self._ref_size[key]
+        _, _, meta, depth_mm = view
+        size = mask_extent(
+            mask,
+            depth_mm,
+            np.asarray(meta["intrinsic_K"], dtype=float),
+            np.asarray(meta["extrinsic_cam2world"], dtype=float),
+        )
+        if ref is None or size is None:
+            return True
+        return size[0] <= 1.5 * ref[0] + 0.02 and size[1] <= 1.5 * ref[1] + 0.02
 
     def _target_mask(self, target: str, pixel, view) -> tuple[np.ndarray, str] | None:
         """The body's mask at ``pixel``: among SAM3 masks from the body's text
