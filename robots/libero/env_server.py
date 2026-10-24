@@ -149,7 +149,56 @@ def _attach_pose_reader(env):
 
         return _plan(env.env.sim, goal_pose, **(options or {}))
 
+    def goal_report():
+        """Each BDDL goal predicate with its value; for ``On``/``In`` the quantities
+        LIBERO tests: for a region (site), the object's offset in the region
+        frame, the region's half-size and contact with the region's parent; for
+        an object, the planar distance, height order and contact."""
+        task = env.env
+        sim = task.sim
+        goals = []
+        for state in task.parsed_problem["goal_state"]:
+            entry = {
+                "predicate": list(state),
+                "value": bool(task._eval_predicate(state)),
+            }
+            try:
+                if len(state) == 3 and state[0].lower() in ("on", "in"):
+                    obj = np.asarray(sim.data.body_xpos[task.obj_body_id[state[1]]])
+                    other = task.object_states_dict[state[2]]
+                    entry["object_pos"] = obj.round(4).tolist()
+                    if other.object_state_type == "site":
+                        site = task.object_sites_dict[state[2]]
+                        pos = sim.data.get_site_xpos(state[2])
+                        mat = sim.data.get_site_xmat(state[2])
+                        entry.update(
+                            region_offset=(mat @ (obj - pos)).round(4).tolist(),
+                            region_half_size=np.asarray(site.size).round(4).tolist(),
+                            contact_with_parent=bool(
+                                task.check_contact(
+                                    task.get_object(other.parent_name),
+                                    task.get_object(state[1]),
+                                )
+                            ),
+                        )
+                    else:
+                        o2 = np.asarray(sim.data.body_xpos[task.obj_body_id[state[2]]])
+                        entry.update(
+                            planar_dist=round(
+                                float(np.linalg.norm(obj[:2] - o2[:2])), 4
+                            ),
+                            height_diff=round(float(obj[2] - o2[2]), 4),
+                            contact=bool(
+                                task.object_states_dict[state[1]].check_contact(other)
+                            ),
+                        )
+            except Exception as exc:  # noqa: BLE001 -- the report is diagnostic
+                entry["detail_error"] = f"{type(exc).__name__}: {exc}"
+            goals.append(entry)
+        return {"success": bool(task._check_success()), "goals": goals}
+
     env.read_poses = read_poses
+    env.goal_report = goal_report
     env.check_paths = check_paths
     env.sim_state = sim_state
     env.plan_path = plan_path
@@ -309,6 +358,7 @@ class LiberoEnvFacade(BaseEnvFacade):
                 "env.poses": self.poses,
                 "env.check_paths": self.check_paths,
                 "env.sim_state": self.sim_state,
+                "env.goal_report": self.goal_report,
                 "env.plan_path": self.plan_path,
             }
         )
@@ -316,6 +366,7 @@ class LiberoEnvFacade(BaseEnvFacade):
         self._readonly_methods.add("env.poses")
         self._readonly_methods.add("env.check_paths")
         self._readonly_methods.add("env.sim_state")
+        self._readonly_methods.add("env.goal_report")
         self._readonly_methods.add("env.plan_path")
 
     # ---- shape helpers ----
@@ -446,6 +497,12 @@ class LiberoEnvFacade(BaseEnvFacade):
         """Flattened MuJoCo state of the live simulator."""
         return self._env.env.workers[self._env_idx].env_call(
             "sim_state", args=[], target="self"
+        )
+
+    def goal_report(self) -> dict:
+        """Goal predicates and the quantities they test (see ``_attach_pose_reader``)."""
+        return self._env.env.workers[self._env_idx].env_call(
+            "goal_report", args=[], target="self"
         )
 
     def check_paths(self, paths, options=None) -> list:

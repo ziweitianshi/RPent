@@ -150,6 +150,14 @@ def _record_views(env: Any, bodies: list[str], cameras: list[str], index: int) -
     np.savez_compressed(out / f"q{index:03d}.npz", **arrays)
 
 
+def _goal_report(env: Any) -> dict[str, Any]:
+    """Final goal predicates (diagnostics), or the error when the env cannot report."""
+    try:
+        return env.goal_report()
+    except Exception as exc:  # noqa: BLE001 -- diagnostics must not fail the episode
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def _hooks(
     toolkit: Any, cfg: MT3Config | None = None, perceiver: Any = None
 ) -> EnvHooks:
@@ -321,6 +329,7 @@ def run_mt3(
         "perception_log": perceiver.log if perceiver is not None else None,
         "locator_calls": getattr(getattr(perceiver, "locator", None), "calls", None),
         "steps": runner.steps,
+        "final_goal": _goal_report(toolkit.primitives.env),
         "success": bool(toolkit.solved()),
         "terminated": bool(toolkit.primitives.env.terminated),
         "truncated": bool(toolkit.primitives.env.truncated),

@@ -104,6 +104,12 @@ class LiberoEnvClient(BaseEnvClient):
             timeout_s=self._TIMEOUT_S["default"],
         )
 
+    def goal_report(self) -> dict:
+        """Goal predicates with their values and the quantities they test."""
+        return self._client.call(
+            "env.goal_report", kwargs={}, timeout_s=self._TIMEOUT_S["default"]
+        )
+
     def sim_state(self) -> list:
         """Flattened MuJoCo state (LIBERO demo ``states`` format)."""
         return self._client.call("env.sim_state", timeout_s=self._TIMEOUT_S["default"])
