@@ -207,6 +207,14 @@ class MT3Config:
     track_rot_tol_deg: float = 5.0
     #: Compensate measured in-hand pose differences before a placement segment.
     grasp_compensation: bool = False
+    #: Replace a placement onto this reference with a generated insert skill.
+    #: The skill uses start-estimated object poses, the gripper pose at the
+    #: previous grasp close, robot proprioception and fixed microwave model
+    #: geometry; it never queries simulator object poses while executing.
+    placement_skill_by_ref: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Development-only outcome telemetry. Never used by placement control and
+    #: disabled for any strict-runtime deployment.
+    placement_diagnostics: bool = False
     #: Rotational symmetry about z per body-name substring: 0 ignores the yaw
     #: change (continuous symmetry), P folds it into +-P/2 degrees. Bodies that
     #: match nothing use their full yaw change.
@@ -612,6 +620,10 @@ class MT3Runner:
         self._carry_yaw = 0.0
         #: Escape offset [m] for the next alignment (see ``via_offsets``).
         self._via: np.ndarray | None = None
+        self._start_poses: dict[str, np.ndarray] = {}
+        self._grasp_eef: np.ndarray | None = None
+        self._in_hand: np.ndarray | None = None
+        self._mug_start: np.ndarray | None = None
 
     def _send(self, target: np.ndarray, gripper: float) -> bool:
         """Track ``target`` for one step; False once the episode has ended."""
@@ -635,11 +647,20 @@ class MT3Runner:
         (open, lift, re-align from the object's new pose) up to
         ``grasp_retries`` times."""
         seg = self.segments[k]
-        grasping = self.cfg.grasp_retries > 0 and any(
-            e[0] == "grasp" for e in seg.get("events", ())
-        )
+        has_grasp_event = any(e[0] == "grasp" for e in seg.get("events", ()))
+        grasping = self.cfg.grasp_retries > 0 and has_grasp_event
         ref = seg["ref"]
-        before = self.env.body_poses([ref])[ref] if grasping else None
+        if self.cfg.placement_skill_by_ref:
+            for key, settings in self.cfg.placement_skill_by_ref.items():
+                reference = settings.get("reference", key)
+                if reference not in self._start_poses:
+                    pose = self.env.body_poses([reference])[reference]
+                    self._start_poses[reference] = pose.copy()
+        before = self.env.body_poses([ref])[ref] if has_grasp_event else None
+        if has_grasp_event:
+            self._start_poses.setdefault(ref, before.copy())
+            if self._placement_enabled():
+                self._mug_start = self._start_poses[ref].copy()
         log = self._dispatch(k)
         retries = []
         while (
@@ -656,6 +677,32 @@ class MT3Runner:
             log["grasp_held"] = bool(self._picked_up(ref, before))
             if retries:
                 log["grasp_retries"] = retries
+        if self.cfg.placement_diagnostics and k > 0 and any(
+            event[0] == "release" for event in seg.get("events", ())
+        ):
+            mug_ref = self.segments[k - 1]["ref"]
+            mug_pose = self.env.body_poses([mug_ref])[mug_ref]
+            microwave_ref = next(
+                (
+                    settings.get("reference", key)
+                    for key, settings in self.cfg.placement_skill_by_ref.items()
+                    if settings.get("reference", key) in self._start_poses
+                ),
+                "microwave_1_main",
+            )
+            microwave = self._start_poses.get(microwave_ref)
+            if microwave is not None:
+                local = np.linalg.inv(microwave) @ mug_pose
+                offset = local[:3, 3] - np.array([0.0, 0.01, 0.096])
+                log["diagnostic_mug_pose_after_release_gt"] = mug_pose.tolist()
+                log["diagnostic_mug_region_offset_after_release_gt_m"] = offset.tolist()
+                log["diagnostic_center_in_heating_region_gt"] = bool(
+                    np.all(np.abs(offset) <= np.array([0.12, 0.0835, 0.08]))
+                )
+            if self._mug_start is not None:
+                log["diagnostic_grasp_lifted_gt"] = bool(
+                    mug_pose[2, 3] - self._mug_start[2, 3] >= 0.015
+                )
         return log
 
     def _picked_up(self, body: str, before: np.ndarray) -> bool:
@@ -681,6 +728,15 @@ class MT3Runner:
                 return
 
     def _dispatch(self, k: int) -> dict[str, Any]:
+        if self._placement_enabled() and any(
+            event[0] == "grasp" for event in self.segments[k].get("events", ())
+        ):
+            self._grasp_eef = None
+            self._in_hand = None
+        if self._placement_settings(
+            self.segments[k]["ref"]
+        ) is not None and self._segment_is_placement(k):
+            return self._segment(k)
         if self.env.check_paths is None:
             return self._segment(k)
         if self.cfg.feasibility_check == "minimal":
@@ -773,6 +829,9 @@ class MT3Runner:
         5. Else the configured route.
         """
         ref = self.segments[k]["ref"]
+        skill = self._placement_settings(ref)
+        if skill is not None and self._segment_is_placement(k):
+            return self._placement_skill(k, skill)
         live = self.env.body_poses([ref])[ref]
         held = (
             self.gripper[
@@ -1052,6 +1111,9 @@ class MT3Runner:
     ) -> dict[str, Any]:
         seg = self.segments[k]
         ref, start, c, end = seg["ref"], seg["start"], seg["c"], seg["end"]
+        skill = self._placement_settings(ref)
+        if skill is not None and self._segment_is_placement(k):
+            return self._placement_skill(k, skill)
         radius = self.cfg.radius
         b = segment_bottleneck(self.eef, seg, radius)
         live = self.env.body_poses([ref])[ref]
@@ -1100,6 +1162,10 @@ class MT3Runner:
             transform = tilt_about(
                 transform, tilt, self.eef[c], self.cfg.grasp_tilt_axis
             )
+        if any(e[0] == "grasp" for e in seg.get("events", ())):
+            self._grasp_eef = transform @ self.eef[c]
+            if self._mug_start is not None:
+                self._in_hand = np.linalg.inv(self._grasp_eef) @ self._mug_start
         log: dict[str, Any] = {
             "segment": k,
             "ref": ref,
@@ -1237,6 +1303,14 @@ class MT3Runner:
                 )
             if not self._send(target, self.gripper[f]):
                 return self._close(log, n0, "done during interaction")
+            if f == c and self._mug_start is not None and any(
+                event[0] == "grasp" for event in seg.get("events", ())
+            ):
+                # Use the achieved proprioceptive pose at finger closure. The
+                # library pose is only the command target and can differ after
+                # controller tracking or contact.
+                self._grasp_eef = self.env.eef_pose()
+                self._in_hand = np.linalg.inv(self._grasp_eef) @ self._mug_start
             if self.cfg.mode == "mt3":
                 for _ in range(self.cfg.track_extra_steps):
                     achieved = self.env.eef_pose()
@@ -1275,6 +1349,120 @@ class MT3Runner:
                         return self._close(log, n0, "done during segment overshoot")
                 log["overshoot_m"] = overshoot
         return self._close(log, n0, "segment replayed")
+
+    def _placement_settings(self, ref: str) -> dict[str, Any] | None:
+        return next(
+            (
+                settings
+                for key, settings in self.cfg.placement_skill_by_ref.items()
+                if settings.get("reference", key) in ref
+            ),
+            None,
+        )
+
+    def _placement_enabled(self) -> bool:
+        return bool(self.cfg.placement_skill_by_ref)
+
+    def _segment_is_placement(self, k: int) -> bool:
+        if k <= 0:
+            return False
+        previous = self.segments[k - 1]
+        current = self.segments[k]
+        held = any(event[0] == "grasp" for event in previous.get("events", ()))
+        released = any(event[0] == "release" for event in current.get("events", ()))
+        return held and released
+
+    def _placement_skill(self, k: int, settings: dict[str, Any]) -> dict[str, Any]:
+        """Generated lift/carry/insert/release/retreat using only allowed inputs.
+
+        The microwave opening is local -y. Model dimensions and heating-region
+        site are constants from LIBERO-PRO's microwave.xml. The object-in-hand
+        transform uses the EEF pose at grasp close and the frozen start estimate
+        of the mug; no live object pose or simulator collision checker is read.
+        """
+        n0 = self.steps
+        microwave = self._start_poses.get(settings.get("reference", "microwave_1_main"))
+        mug_ref = self.segments[k - 1]["ref"]
+        if microwave is None or self._grasp_eef is None or self._in_hand is None:
+            log = {"segment": k, "skill": "microwave_insert", "blocked": True}
+            return self._close(log, n0, "missing start pose or grasp frame")
+        in_hand = self._in_hand
+        # Microwave heating_region site: pos (0, .01, .096), size (.12,.0835,.08).
+        target = np.eye(4)
+        # Preserve the mug's grasped orientation. Forcing microwave-frame
+        # identity can demand a large wrist rotation that this arm cannot track.
+        target[:3, :3] = self._grasp_eef[:3, :3] @ in_hand[:3, :3]
+        target[:3, 3] = (microwave @ np.array([0.0, 0.01, 0.096, 1.0]))[:3]
+        # Successful V5 placements cluster near site-relative (x=.02,y=-.05,z=-.066).
+        # The opening faces local -y; enter from outside at -y and move inward +y.
+        target[:3, 3] += microwave[:3, 1] * float(settings.get("target_y", -0.05))
+        target[:3, 3] += microwave[:3, 2] * float(settings.get("target_z", -0.066))
+        target[:3, 3] += microwave[:3, 0] * float(settings.get("target_x", 0.02))
+        eef_target = target @ np.linalg.inv(in_hand)
+        axis = microwave[:3, 1]
+        # Conservative geometric corridor: keep the wrist above cabinet top
+        # (model top z=.20) until the pre-insert waypoint in front of opening.
+        pre = eef_target.copy()
+        pre[:3, 3] -= axis * float(settings.get("preinsert_depth", 0.11))
+        safe = pre.copy()
+        safe[:3, 3] += microwave[:3, 2] * float(settings.get("carry_height", 0.24))
+        current = self.env.eef_pose()
+        lift = current.copy()
+        lift[:3, 3] += microwave[:3, 2] * float(settings.get("lift_height", 0.16))
+        phases = [
+            (lift, self._last_gripper),
+            (safe, self._last_gripper),
+            (pre, self._last_gripper),
+            (eef_target, self._last_gripper),
+        ]
+        log = {
+            "segment": k,
+            "ref": mug_ref,
+            "skill": "microwave_insert",
+            "used_inputs": [
+                "episode_start_pose_estimates",
+                "eef_pose_at_grasp_close",
+                "robot_proprioception",
+                "robot_kinematics",
+                "microwave_model_geometry",
+            ],
+            "target_microwave_local": [
+                float(settings.get("target_x", 0.02)),
+                float(settings.get("target_y", -0.05)),
+                0.096 + float(settings.get("target_z", -0.066)),
+            ],
+            "preinsert_depth_m": float(settings.get("preinsert_depth", 0.11)),
+        }
+        current = self.env.eef_pose()
+        for waypoint, grip in phases:
+            distance = float(np.linalg.norm(waypoint[:3, 3] - current[:3, 3]))
+            count = max(1, int(np.ceil(distance / self.cfg.align_step)))
+            for i in range(1, count + 1):
+                tau = i / count
+                pose = waypoint.copy()
+                pose[:3, 3] = current[:3, 3] * (1 - tau) + waypoint[:3, 3] * tau
+                pose[:3, :3] = slerp(current[:3, :3], waypoint[:3, :3], tau)
+                if not self._send(pose, grip):
+                    return self._close(log, n0, "done during generated insert")
+            current = waypoint
+        # Open and hold long enough for the mug handle to disengage before
+        # lifting the fingertips clear of its handle before the axial retreat.
+        for _ in range(max(5, self.cfg.hold_steps)):
+            if not self._send(eef_target, -1.0):
+                return self._close(log, n0, "done while releasing mug")
+        clear = eef_target.copy()
+        clear[:3, 3] += microwave[:3, 2] * float(
+            settings.get("release_lift", 0.08)
+        )
+        for pose in alignment_path(eef_target, clear, self.cfg.align_step):
+            if not self._send(pose, -1.0):
+                break
+        retreat = eef_target.copy()
+        retreat[:3, 3] -= axis * float(settings.get("retreat_depth", 0.16))
+        for pose in alignment_path(eef_target, retreat, self.cfg.align_step):
+            if not self._send(pose, -1.0):
+                break
+        return self._close(log, n0, "generated insertion completed")
 
     def _feasibility(
         self,
