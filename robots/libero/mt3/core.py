@@ -231,6 +231,11 @@ class MT3Config:
     track_rot_tol_deg: float = 5.0
     #: Compensate measured in-hand pose differences before a placement segment.
     grasp_compensation: bool = False
+    #: Estimate compensation from the frozen start pose at gripper closure.
+    #: This avoids treating a frozen object estimate as live after lift.
+    grasp_compensation_frozen_estimate: bool = False
+    #: Compensate a CP-Gen grasp using only its known applied tilt angle.
+    grasp_compensation_tilt_only: bool = False
     #: Replace a placement onto this reference with a generated insert skill.
     #: The skill uses start-estimated object poses, the gripper pose at the
     #: previous grasp close, robot proprioception and fixed microwave model
@@ -1412,9 +1417,25 @@ class MT3Runner:
             or not any(e[0] == "grasp" for e in previous["events"])
         ):
             return None
-        live_grasp = (
-            np.linalg.inv(self.env.eef_pose()) @ self.env.body_poses([held])[held]
-        )
+        if self.cfg.grasp_compensation_tilt_only:
+            correction = np.eye(4)
+            if self._tilt:
+                demo_eef = self.lib.eef[rows][b]
+                world_axis = demo_eef[:3, self.cfg.grasp_tilt_axis]
+                local_axis = demo_eef[:3, :3].T @ world_axis
+                correction[:3, :3] = Rotation.from_rotvec(
+                    -self._tilt * local_axis
+                ).as_matrix()
+            return correction
+        if self.cfg.grasp_compensation_frozen_estimate:
+            live_grasp = self._in_hand
+            if live_grasp is None:
+                return None
+        else:
+            live_grasp = (
+                np.linalg.inv(self.env.eef_pose())
+                @ self.env.body_poses([held])[held]
+            )
         if np.linalg.norm(live_grasp[:3, 3]) >= 0.15:
             return None
         demo_grasp = (
@@ -1663,14 +1684,21 @@ class MT3Runner:
                 )
             if not self._send(target, self.gripper[f]):
                 return self._close(log, n0, "done during interaction")
-            if f == c and self._mug_start is not None and any(
+            if f == c and (
+                self._mug_start is not None
+                or self.cfg.grasp_compensation_frozen_estimate
+            ) and any(
                 event[0] == "grasp" for event in seg.get("events", ())
             ):
                 # Use the achieved proprioceptive pose at finger closure. The
                 # library pose is only the command target and can differ after
                 # controller tracking or contact.
                 self._grasp_eef = self.env.eef_pose()
-                self._in_hand = np.linalg.inv(self._grasp_eef) @ self._mug_start
+                frozen_pose = self._start_poses.get(ref)
+                if frozen_pose is None and self._mug_start is not None:
+                    frozen_pose = self._mug_start
+                if frozen_pose is not None:
+                    self._in_hand = np.linalg.inv(self._grasp_eef) @ frozen_pose
                 self._held_object_ref = ref
                 self._held_object_valid = True
                 if self.cfg.held_object_diagnostics:

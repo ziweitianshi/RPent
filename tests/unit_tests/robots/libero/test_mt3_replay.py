@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 from robots.libero.env_server import _configure_fixture_seed, _seed_fixture_sampler
 from robots.libero.mt3.core import (
@@ -39,6 +40,71 @@ def test_cpgenfeas_flags_preserve_legacy_defaults():
     assert not cfg.cpgen_grasp_local_check
     assert not cfg.cpgen_grasp_contact_tolerance
     assert not cfg.cpgen_grasp_rrt_fallback
+    assert not cfg.grasp_compensation_frozen_estimate
+    assert not cfg.grasp_compensation_tilt_only
+
+
+@pytest.mark.parametrize("tilt", [0.0, np.radians(20.0)])
+def test_tilt_only_grasp_compensation_inverts_applied_tilt(tilt):
+    demo_eef = np.eye(4)
+    demo_eef[:3, :3] = tilt_about(np.eye(4), 0.0, np.eye(4), 0)[:3, :3]
+    rows = slice(0, 2)
+    lib = SimpleNamespace(
+        frames=lambda _demo: rows,
+        segments=[[{"ref": "object", "events": [("grasp",)]},
+                   {"ref": "target", "events": [("release",)]}]],
+        gripper=np.ones(2),
+        eef=np.repeat(demo_eef[None], 2, axis=0),
+        pose={"object": np.repeat(np.eye(4)[None], 2, axis=0)},
+    )
+    runner = SimpleNamespace(
+        cfg=MT3Config(grasp_compensation=True, grasp_compensation_tilt_only=True),
+        lib=lib,
+        _tilt=tilt,
+    )
+    delta = MT3Runner._grasp_delta(runner, 1, 0, 1)
+    assert delta is not None
+    if tilt == 0.0:
+        np.testing.assert_allclose(delta, np.eye(4), atol=1e-8)
+    else:
+        np.testing.assert_allclose(
+            delta[:3, :3] @ Rotation.from_rotvec([tilt, 0, 0]).as_matrix(),
+            np.eye(3), atol=1e-8,
+        )
+
+
+def test_frozen_grasp_compensation_uses_closure_transform_after_lift():
+    """Frozen start pose must not be recomputed against a post-lift EEF pose."""
+    from robots.libero.mt3.core import MT3Runner
+
+    obj_in_eef = np.eye(4)
+    obj_in_eef[:3, 3] = [0.0, 0.08, 0.02]
+    lib_eef = np.repeat(np.eye(4)[None], 2, axis=0)
+    lib_pose = np.repeat(obj_in_eef[None], 2, axis=0)
+    rows = slice(0, 2)
+    lib = SimpleNamespace(
+        frames=lambda _demo: rows,
+        segments=[[{"ref": "object", "events": [("grasp",)]},
+                   {"ref": "target", "events": [("release",)]}]],
+        gripper=np.ones(2),
+        eef=lib_eef,
+        pose={"object": lib_pose},
+    )
+    lifted_eef = np.eye(4)
+    lifted_eef[2, 3] = 0.2
+    env = SimpleNamespace(
+        eef_pose=lambda: lifted_eef,
+        body_poses=lambda refs: {"object": obj_in_eef},
+    )
+    runner = SimpleNamespace(
+        cfg=MT3Config(grasp_compensation=True,
+                      grasp_compensation_frozen_estimate=True),
+        lib=lib,
+        env=env,
+        _in_hand=obj_in_eef,
+    )
+    correction = MT3Runner._grasp_delta(runner, 1, 0, 1)
+    np.testing.assert_allclose(correction, np.eye(4), atol=1e-9)
 
 
 def test_cpgen_strict_ik_rejects_intermediate_and_goal_errors():
