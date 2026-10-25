@@ -92,6 +92,8 @@ class MT3Config:
     strict_planning_scene: bool = False
     #: Search grasp contact-frame rotations with strict DLS/collision planning.
     cpgen_grasp: bool = False
+    #: Plan the approach to the door-closing segment with strict-scene RRT.
+    cpgen_door_rrt: bool = False
     #: Search insertion keypoint poses in yaw/roll while carrying the mug.
     cpgen_placement: bool = False
     cpgen_min_joint_margin_deg: float = 8.0
@@ -750,6 +752,37 @@ class MT3Runner:
         if self.cfg.feasibility_check == "minimal":
             return self._run_minimal(k)
         if self.cfg.feasibility_check != "select":
+            if (
+                self.cfg.cpgen_door_rrt
+                and "microdoorroot" in self.segments[k]["ref"]
+                and self.env.plan_path is not None
+            ):
+                ref = self.segments[k]["ref"]
+                live = self.env.body_poses([ref])[ref]
+                seg = self.segments[k]
+                b = segment_bottleneck(self.eef, seg, self.cfg.radius)
+                transform, _ = self.cfg.transfer(
+                    ref, live, self.lib.pose[ref][self.first + b],
+                    offset_recorded(self.lib, self.demo),
+                )
+                planned = self.env.plan_path(transform @ self.eef[b])
+                if planned.get("success"):
+                    log = self._segment(
+                        k, precomputed_path=[np.asarray(p) for p in planned["path"]]
+                    )
+                    log["cpgen_door_rrt"] = {
+                        "attempted": True,
+                        "success": True,
+                        "path_length": planned.get("path_length"),
+                        "planner": "strict_scene",
+                    }
+                    return log
+                log = self._segment(k)
+                log["cpgen_door_rrt"] = {
+                    "attempted": True, "success": False,
+                    "planner": "strict_scene", "fallback": "configured route",
+                }
+                return log
             return self._segment(k)
         ref = self.segments[k]["ref"]
         live = self.env.body_poses([ref])[ref]
