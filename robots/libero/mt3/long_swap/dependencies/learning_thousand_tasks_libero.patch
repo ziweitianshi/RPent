@@ -1,0 +1,34 @@
+diff --git a/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/preprocessor.py b/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/preprocessor.py
+index 78c5814..404fecd 100644
+--- a/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/preprocessor.py
++++ b/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/preprocessor.py
+@@ -73,0 +74,7 @@ class Preprocessor():
++    @staticmethod
++    def _to_hwc(image: np.ndarray) -> np.ndarray:
++        """Images may come channels-first (C, H, W) or, as SceneState stores them, (H, W, C)."""
++        if image.ndim == 3 and image.shape[-1] == 3:
++            return image
++        return image.transpose(1, 2, 0)
++
+@@ -79,2 +86,6 @@ class Preprocessor():
+-        semi_sorted_args = np.argpartition(-seg_flat_depth[:], n_smallest)
+-        largest_values = seg_flat_depth[semi_sorted_args[:n_smallest]]
++        # Small masks (fewer than n_smallest points) use all of their depths.
++        if seg_flat_depth.size > n_smallest:
++            semi_sorted_args = np.argpartition(-seg_flat_depth[:], n_smallest)
++            largest_values = seg_flat_depth[semi_sorted_args[:n_smallest]]
++        else:
++            largest_values = seg_flat_depth
+@@ -139 +150 @@ class Preprocessor():
+-        rgb_data = data["image_0"].transpose(1, 2, 0).reshape(-1, 3)
++        rgb_data = self._to_hwc(data["image_0"]).reshape(-1, 3)
+@@ -143 +154 @@ class Preprocessor():
+-        rgb_data = data["image_1"].transpose(1, 2, 0).reshape(-1, 3)
++        rgb_data = self._to_hwc(data["image_1"]).reshape(-1, 3)
+diff --git a/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/rotation_predictor.py b/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/rotation_predictor.py
+index e16caa6..84ecf84 100644
+--- a/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/rotation_predictor.py
++++ b/thousand_tasks/perception/relative_pose_estimation/pose_estimators/direct/rotation_predictor.py
+@@ -30 +30 @@ class RotationPredictor(RotationPredictorBase):
+-        state_dict = torch.load(ckpt_path, map_location='cpu')['state_dict']
++        state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=False)['state_dict']  # full pickle; torch>=2.6 defaults to weights_only=True

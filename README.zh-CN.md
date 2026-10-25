@@ -27,6 +27,10 @@
   <img src="https://github.com/RLinf/misc/raw/main/pic/rpent_framework.png" alt="RPent framework"/>
 </div>
 
+## Long Swap 重放实验
+
+本分支提供 [Long Swap 重放说明与结果](robots/libero/mt3/long_swap/README.md)：原真值位姿快照基线（seed 10–49：310/400），以及统一配置 + v2r 库的严格感知版本（seed 0–9：73/100）。同配置多次评测逐任务取最好为 78/100，不是单次完整评测。新感知数据包已准备，尚未上传 Release。
+
 ## 排行榜
 
 对比 RPent 与参考方法在 LIBERO、LIBERO-PRO、RoboCasa365 Target50 和 RoboTwin C2R 上的成功率。排名仅限图中方法及评测范围；套件成绩和模型配置见 [排行榜](https://rpent.readthedocs.io/zh-cn/latest/rst_source/leaderboard.html)。

@@ -1,0 +1,136 @@
+{
+  "label": "strict_align005_t0_t9_repeat",
+  "source_run": "20261025-2241_official_t0_t9_align005_astra_strict",
+  "episodes": 20,
+  "success": 10,
+  "per_task": {
+    "A_t0": "7/10",
+    "B9_t9": "3/10"
+  },
+  "align_step": 0.005,
+  "rpent_commit": "73b92f118d28c958db40aec43a4e681dab2b201d",
+  "initialization": "native; fixed-fixture placements can vary between processes",
+  "pose_source": "strict perception; Astra once per episode",
+  "rows": [
+    {
+      "task": 0,
+      "seed": 0,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 1,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 2,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 3,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 4,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 5,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 6,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 7,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 8,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 9,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 9,
+      "seed": 0,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 1,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 9,
+      "seed": 2,
+      "rc": 0,
+      "success": true
+    },
+    {
+      "task": 9,
+      "seed": 3,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 4,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 5,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 6,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 7,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 8,
+      "rc": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 9,
+      "rc": 0,
+      "success": true
+    }
+  ]
+}

@@ -27,6 +27,10 @@
   <img src="https://github.com/RLinf/misc/raw/main/pic/rpent_framework.png" alt="RPent framework"/>
 </div>
 
+## Long Swap replay experiment
+
+This branch includes [Long Swap replay instructions and results](robots/libero/mt3/long_swap/README.md): the original ground-truth snapshot baseline (310/400 on seeds 10–49), plus strict perception with one configuration and the v2r library (73/100 on seeds 0–9). Selecting the best result per task across repeated runs yields 78/100; this is not a single full evaluation. The new perception data package is prepared but has not been uploaded to Releases.
+
 ## Leaderboard
 
 Compare RPent with reference methods on LIBERO, LIBERO-PRO, RoboCasa365 Target50, and RoboTwin C2R. Rankings apply to the methods and evaluation coverage shown; see the [Leaderboard](https://rpent.readthedocs.io/en/latest/rst_source/leaderboard.html) for suite results and model configurations.

@@ -1,0 +1,528 @@
+{
+  "label": "strict_align005",
+  "source_run": "20261025-2207_official_yesterdaycfg_v2r_align005_astra_strict",
+  "episodes": 100,
+  "success": 73,
+  "per_task": {
+    "t0": "5/10",
+    "t1": "7/10",
+    "t2": "10/10",
+    "t3": "8/10",
+    "t4": "10/10",
+    "t5": "10/10",
+    "t6": "8/10",
+    "t7": "8/10",
+    "t8": "7/10",
+    "t9": "0/10"
+  },
+  "align_step": 0.005,
+  "rpent_commit": "73b92f118d28c958db40aec43a4e681dab2b201d",
+  "initialization": "native; fixed-fixture placements can vary between processes",
+  "pose_source": "strict perception; Astra once per episode",
+  "rows": [
+    {
+      "task": 0,
+      "seed": 0,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 2,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 4,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 5,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 0,
+      "seed": 7,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 8,
+      "success": false
+    },
+    {
+      "task": 0,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 2,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 3,
+      "success": false
+    },
+    {
+      "task": 1,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 6,
+      "success": false
+    },
+    {
+      "task": 1,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 8,
+      "success": true
+    },
+    {
+      "task": 1,
+      "seed": 9,
+      "success": false
+    },
+    {
+      "task": 2,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 2,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 8,
+      "success": true
+    },
+    {
+      "task": 2,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 2,
+      "success": false
+    },
+    {
+      "task": 3,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 3,
+      "seed": 8,
+      "success": false
+    },
+    {
+      "task": 3,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 2,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 8,
+      "success": true
+    },
+    {
+      "task": 4,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 2,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 8,
+      "success": true
+    },
+    {
+      "task": 5,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 0,
+      "success": false
+    },
+    {
+      "task": 6,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 2,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 6,
+      "seed": 8,
+      "success": false
+    },
+    {
+      "task": 6,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 2,
+      "success": false
+    },
+    {
+      "task": 7,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 5,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 7,
+      "success": true
+    },
+    {
+      "task": 7,
+      "seed": 8,
+      "success": false
+    },
+    {
+      "task": 7,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 0,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 1,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 2,
+      "success": false
+    },
+    {
+      "task": 8,
+      "seed": 3,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 4,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 5,
+      "success": false
+    },
+    {
+      "task": 8,
+      "seed": 6,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 7,
+      "success": false
+    },
+    {
+      "task": 8,
+      "seed": 8,
+      "success": true
+    },
+    {
+      "task": 8,
+      "seed": 9,
+      "success": true
+    },
+    {
+      "task": 9,
+      "seed": 0,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 1,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 2,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 3,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 4,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 5,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 6,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 7,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 8,
+      "success": false
+    },
+    {
+      "task": 9,
+      "seed": 9,
+      "success": false
+    }
+  ],
+  "source_runs": [
+    "20261025-2207_official_yesterdaycfg_v2r_align005_astra_strict",
+    "20261025-2228_official_align005_auth_restored"
+  ]
+}

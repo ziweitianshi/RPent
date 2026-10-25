@@ -1,0 +1,31 @@
+{
+  "library": "library",
+  "mode": "mt3",
+  "radius": 0.1,
+  "align_step": 0.005,
+  "settle_pos_tol": 0.003,
+  "settle_rot_tol_deg": 2.0,
+  "settle_max": 50,
+  "hold_steps": 30,
+  "yaw_symmetry": {
+    "bowl": 0,
+    "plate": 0,
+    "ramekin": 0,
+    "burner": 0
+  },
+  "approach_corridor": 0.2,
+  "feasibility_topk": 10,
+  "record_trace": false,
+  "pose_source": "perception",
+  "perception_locator": "astra",
+  "perception_cameras": [
+    "agentview",
+    "robot0_eye_in_hand"
+  ],
+  "perception_locator_calls": 1,
+  "freeze_poses": true,
+  "freeze_parts": false,
+  "perception_refresh_parts": true,
+  "perception_share_fixture": true,
+  "release_at_end": true
+}
