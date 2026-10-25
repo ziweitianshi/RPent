@@ -29,7 +29,7 @@
 
 ## Long Swap replay experiment
 
-This branch includes [Long Swap replay instructions and results](robots/libero/mt3/long_swap/README.md): the original ground-truth snapshot baseline (310/400 on seeds 10–49), plus strict perception with one configuration and the v2r library (73/100 on seeds 0–9). Selecting the best result per task across repeated runs yields 78/100; this is not a single full evaluation. The new perception data package is prepared but has not been uploaded to Releases.
+This branch includes [Long Swap replay instructions and results](robots/libero/mt3/long_swap/README.md): the original ground-truth snapshot baseline (310/400 on seeds 10–49), plus strict perception with one configuration and the v2r library (73/100 and an independent delivery-runner repeat of 75/100 on seeds 0–9). Selecting the best result per task across repeated runs yields 78/100; this is not a single full evaluation. The new perception data package is prepared but has not been uploaded to Releases.
 
 ## Leaderboard
 
