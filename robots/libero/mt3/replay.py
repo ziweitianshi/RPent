@@ -197,7 +197,11 @@ def _hooks(
         joint_positions=lambda: np.asarray(primitives._last_obs["states"][3:9], dtype=float),
         goal_report=env.goal_report,
         body_poses=body_poses,
-        start_pose=start_poses(["white_yellow_mug_1_main", "microwave_1_main"]),
+        start_pose=(
+            start_poses(["white_yellow_mug_1_main", "microwave_1_main"])
+            if cfg is not None and cfg.grasp_tilt_by_dy
+            else {}
+        ),
         done=lambda: bool(env.terminated or env.truncated),
         check_paths=lambda paths, options=None: env.check_paths(paths, options),
         plan_path=lambda goal: env.plan_path(goal),
