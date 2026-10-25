@@ -96,7 +96,12 @@ class MT3Config:
     cpgen_door_rrt: bool = False
     #: Search insertion keypoint poses in yaw/roll while carrying the mug.
     cpgen_placement: bool = False
+    #: Retarget held demo segments using the estimated object-in-EEF transform.
+    held_object_retarget: bool = False
+    #: Diagnostic only: may read live simulator object poses.
+    held_object_diagnostics: bool = False
     cpgen_min_joint_margin_deg: float = 8.0
+    cpgen_grasp_tilts_deg: list[float] = field(default_factory=list)
     #: Use joint-space RRT-Connect when all static alignment routes fail.
     rrt_fallback: bool = False
     feasibility_topk: int = 5
@@ -284,6 +289,11 @@ def pose_from_wxyz(values) -> np.ndarray:
 
 def rot_angle_deg(rot: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip((np.trace(rot) - 1.0) / 2.0, -1, 1))))
+
+
+def held_object_eef_target(ref_target, object_relative_to_ref_demo, object_in_eef):
+    """EEF pose that places the held object on its demo-relative target."""
+    return ref_target @ object_relative_to_ref_demo @ np.linalg.inv(object_in_eef)
 
 
 def rz(angle: float) -> np.ndarray:
@@ -597,6 +607,8 @@ class EnvHooks:
     check_paths: Callable[..., list[dict[str, Any]]] | None = None
     #: Plan one grip-site pose on a copied simulator state.
     plan_path: Callable[[np.ndarray], dict[str, Any]] | None = None
+    #: Raw simulator poses for opt-in diagnosis only.
+    diagnostic_body_poses: Callable[[list[str]], dict[str, np.ndarray]] | None = None
 
 
 class MT3Runner:
@@ -639,6 +651,8 @@ class MT3Runner:
         self._start_poses: dict[str, np.ndarray] = {}
         self._grasp_eef: np.ndarray | None = None
         self._in_hand: np.ndarray | None = None
+        self._held_object_ref: str | None = None
+        self._held_object_valid = False
         self._mug_start: np.ndarray | None = None
         self._placement_trace: list[dict[str, Any]] = []
         self._placement_active = False
@@ -694,10 +708,27 @@ class MT3Runner:
                 self._start_poses[reference] = pose.copy()
         before = self.env.body_poses([ref])[ref] if has_grasp_event else None
         if has_grasp_event:
-            self._start_poses.setdefault(ref, before.copy())
+            estimate = self.start_pose.get(ref)
+            if estimate is not None:
+                self._start_poses.setdefault(ref, np.asarray(estimate).copy())
+            elif not self.cfg.held_object_retarget:
+                self._start_poses.setdefault(ref, before.copy())
+            self._held_object_ref = ref
+            self._held_object_valid = False
+            if self.cfg.held_object_retarget and ref in self._start_poses:
+                self._mug_start = self._start_poses[ref].copy()
             if self._placement_enabled():
                 self._mug_start = self._start_poses[ref].copy()
+        diag_start = self._held_transform_diagnostic(k, "start")
         log = self._dispatch(k)
+        if diag_start is not None:
+            log.setdefault("held_object_diagnostics", []).append(diag_start)
+            diag_end = self._held_transform_diagnostic(k, "end")
+            if diag_end is not None:
+                log["held_object_diagnostics"].append(diag_end)
+        if any(event[0] == "release" for event in seg.get("events", ())):
+            self._held_object_ref = None
+            self._held_object_valid = False
         retries = []
         while (
             grasping
@@ -740,6 +771,33 @@ class MT3Runner:
                     mug_pose[2, 3] - self._mug_start[2, 3] >= 0.015
                 )
         return log
+
+    def _held_transform_diagnostic(self, k: int, phase: str) -> dict[str, Any] | None:
+        """Compare true, strict-estimated and demo object-in-EEF transforms."""
+        if not self.cfg.held_object_diagnostics or self._held_object_ref is None:
+            return None
+        ref = self._held_object_ref
+        if ref not in self.lib.pose or self._in_hand is None:
+            return None
+        pose_reader = self.env.diagnostic_body_poses or self.env.body_poses
+        true_object = pose_reader([ref])[ref]
+        eef = self.env.eef_pose()
+        demo_frame = self.first + self.segments[k]["c"]
+        demo_eef = self.lib.eef[demo_frame]
+        demo_object = self.lib.pose[ref][demo_frame]
+        true_in_eef = np.linalg.inv(eef) @ true_object
+        demo_in_eef = np.linalg.inv(demo_eef) @ demo_object
+        return {
+            "segment": k,
+            "phase": phase,
+            "true_object_in_eef": true_in_eef.tolist(),
+            "strict_estimated_object_in_eef": self._in_hand.tolist(),
+            "demo_object_in_eef": demo_in_eef.tolist(),
+            "true_position_error_vs_demo_cm": float(100 * np.linalg.norm(true_in_eef[:3, 3] - demo_in_eef[:3, 3])),
+            "estimated_position_error_vs_demo_cm": float(100 * np.linalg.norm(self._in_hand[:3, 3] - demo_in_eef[:3, 3])),
+            "true_angle_error_vs_demo_deg": rot_angle_deg(true_in_eef[:3, :3].T @ demo_in_eef[:3, :3]),
+            "estimated_angle_error_vs_demo_deg": rot_angle_deg(self._in_hand[:3, :3].T @ demo_in_eef[:3, :3]),
+        }
 
     def _picked_up(self, body: str, before: np.ndarray) -> bool:
         """``body`` rose with the closed gripper and stays near the grip site."""
@@ -827,7 +885,11 @@ class MT3Runner:
             demos=[self.demo] if cpgen_grasp else None,
             lengths=(self.cfg.approach_corridor,) if cpgen_grasp else (0.0, 0.1, 0.2),
             clearances=(self.cfg.transit_clearance,) if cpgen_grasp else (0.0, 0.06, 0.12, 0.2),
-            tilts=(0.0, *(v for a in range(5, 76, 5) for v in (-float(a), float(a))))
+            tilts=(
+                tuple(self.cfg.cpgen_grasp_tilts_deg)
+                if self.cfg.cpgen_grasp_tilts_deg
+                else (0.0, *(v for a in range(5, 76, 5) for v in (-float(a), float(a))))
+            )
             if cpgen_grasp else (0.0,),
         )
         feasible = [
@@ -1253,10 +1315,37 @@ class MT3Runner:
         radius = self.cfg.radius
         b = segment_bottleneck(self.eef, seg, radius)
         live = self.env.body_poses([ref])[ref]
+        diagnostic_ref_before = None
+        if self.cfg.held_object_diagnostics and self.env.diagnostic_body_poses is not None:
+            diagnostic_ref_before = self.env.diagnostic_body_poses([ref])[ref]
         demo_ref = self.lib.pose[ref][self.first + b]
         transform, dyaw = self.cfg.transfer(
             ref, live, demo_ref, offset_recorded(self.lib, self.demo)
         )
+        retarget_log = None
+        prior_events = [
+            event[0] for prior in self.segments[:k] for event in prior.get("events", ())
+        ]
+        if (
+            self.cfg.held_object_retarget
+            and self._in_hand is not None
+            and self._held_object_ref is not None
+            and self._held_object_valid
+            and k > 0
+            and "grasp" in prior_events
+            and "release" not in prior_events[prior_events.index("grasp") + 1:]
+        ):
+            held_demo = self.lib.pose[self._held_object_ref][self.first + b]
+            object_relative_to_ref = np.linalg.inv(demo_ref) @ held_demo
+            # Desired object pose follows the demo's pose relative to this
+            # segment reference; convert through the frozen estimated grasp.
+            transform = held_object_eef_target(
+                transform @ demo_ref, object_relative_to_ref, self._in_hand
+            )
+            retarget_log = {
+                "object_ref": self._held_object_ref,
+                "source": "frozen_start_estimate+eef_pose_at_closure",
+            }
         if self._yaw:
             transform = yaw_about(
                 transform, self._yaw, self._pivot(k, self.demo, transform, live)
@@ -1302,6 +1391,8 @@ class MT3Runner:
             self._grasp_eef = transform @ self.eef[c]
             if self._mug_start is not None:
                 self._in_hand = np.linalg.inv(self._grasp_eef) @ self._mug_start
+                self._held_object_ref = ref
+                self._held_object_valid = True
         log: dict[str, Any] = {
             "segment": k,
             "ref": ref,
@@ -1314,6 +1405,8 @@ class MT3Runner:
             ),
             "ref_yaw_change_deg": round(float(np.degrees(dyaw)), 1),
         }
+        if retarget_log is not None:
+            log["held_object_retarget"] = retarget_log
         if tilt:
             log["tilt"] = round(float(np.degrees(tilt)), 2)
         n0 = self.steps
@@ -1416,6 +1509,13 @@ class MT3Runner:
                 100 * float(np.linalg.norm(after[:3, 3] - live[:3, 3])), 2
             ),
         )
+        if diagnostic_ref_before is not None:
+            diagnostic_ref_after = self.env.diagnostic_body_poses([ref])[ref]
+            log["diagnostic_ref_moved_during_approach_cm"] = float(
+                100 * np.linalg.norm(
+                    diagnostic_ref_after[:3, 3] - diagnostic_ref_before[:3, 3]
+                )
+            )
         if self.cfg.alignment_guard_pos and (
             pos_err > self.cfg.alignment_guard_pos
             or rot_err > self.cfg.alignment_guard_rot_deg
@@ -1447,6 +1547,16 @@ class MT3Runner:
                 # controller tracking or contact.
                 self._grasp_eef = self.env.eef_pose()
                 self._in_hand = np.linalg.inv(self._grasp_eef) @ self._mug_start
+                self._held_object_ref = ref
+                self._held_object_valid = True
+                if self.cfg.held_object_diagnostics:
+                    closure_diag = self._held_transform_diagnostic(
+                        k, "after_gripper_close"
+                    )
+                    if closure_diag is not None:
+                        log.setdefault("held_object_diagnostics", []).append(
+                            closure_diag
+                        )
             if self.cfg.mode == "mt3":
                 for _ in range(self.cfg.track_extra_steps):
                     achieved = self.env.eef_pose()
@@ -1632,6 +1742,12 @@ class MT3Runner:
             ],
             "preinsert_depth_m": float(settings.get("preinsert_depth", 0.11)),
         }
+        if self.cfg.held_object_retarget:
+            log["held_object_retarget"] = {
+                "applied": True,
+                "scope": "handwritten_object_target_through_estimated_in_hand_transform",
+                "source": "frozen_start_estimate+eef_pose_at_closure",
+            }
         if self.cfg.cpgen_placement:
             log["cpgen_placement"] = {
                 "yaw_deg": selected_yaw,
@@ -1674,6 +1790,10 @@ class MT3Runner:
             current = waypoint
         # Open and hold long enough for the mug handle to disengage before
         # lifting the fingertips clear of its handle before the axial retreat.
+        if self.cfg.held_object_diagnostics:
+            pre_release_diag = self._held_transform_diagnostic(k, "before_release")
+            if pre_release_diag is not None:
+                log.setdefault("held_object_diagnostics", []).append(pre_release_diag)
         for _ in range(max(5, self.cfg.hold_steps)):
             self._placement_phase = "release"
             if not self._send(eef_target, -1.0):
@@ -1694,6 +1814,8 @@ class MT3Runner:
                 break
         log["placement_trace"] = self._placement_trace
         self._placement_active = False
+        self._held_object_valid = False
+        self._held_object_ref = None
         return self._close(log, n0, "generated insertion completed")
 
     def _feasibility(

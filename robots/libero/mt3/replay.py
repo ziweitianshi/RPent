@@ -231,6 +231,9 @@ def _hooks(
         joint_positions=lambda: np.asarray(primitives._last_obs["states"][3:9], dtype=float),
         goal_report=env.goal_report,
         body_poses=body_poses,
+        diagnostic_body_poses=lambda bodies: {
+            name: pose_from_wxyz(value) for name, value in env.poses(bodies).items()
+        },
         start_pose=(
             start_poses(["white_yellow_mug_1_main", "microwave_1_main"])
             if cfg is not None and cfg.grasp_tilt_by_dy
@@ -320,6 +323,13 @@ def run_mt3(
     # The planner scene must cover all references in this retrieved demo,
     # including fixtures that are not the immediate segment target.
     hooks._planning_context.update(library=lib, demo=demo)
+    if cfg.held_object_retarget or cfg.held_object_diagnostics:
+        # These are the already-frozen episode-start estimates returned by the
+        # configured perception source; later segments never refresh them.
+        estimated_refs = {segment["ref"] for segment in lib.segments[demo]}
+        hooks.start_pose = {
+            ref: scene[ref].copy() for ref in estimated_refs if ref in scene
+        }
     if cfg.retrieval == "reach" and hooks.check_paths is not None:
         demo, reach = reach_retrieval(lib, scene, cfg, hooks)
         retrieval = {**retrieval, "demo": demo, "reach": reach}

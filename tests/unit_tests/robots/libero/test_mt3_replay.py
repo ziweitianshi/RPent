@@ -25,6 +25,7 @@ from robots.libero.mt3.core import (
     MT3Config,
     MT3Runner,
     grasp_tilt_recorded,
+    held_object_eef_target,
     offset_recorded,
     segment_bottleneck,
     tilt_about,
@@ -32,6 +33,15 @@ from robots.libero.mt3.core import (
 from robots.libero.mt3.feasibility import SceneChecker, _rrt_connect, _shortcut_path
 
 
+def test_held_object_retarget_places_object_on_demo_relative_pose():
+    ref_target = np.eye(4)
+    ref_target[:3, 3] = [0.4, -0.2, 0.3]
+    obj_rel = np.eye(4)
+    obj_rel[:3, 3] = [0.1, 0.0, 0.05]
+    in_hand = np.eye(4)
+    in_hand[:3, 3] = [0.0, 0.08, 0.02]
+    eef = held_object_eef_target(ref_target, obj_rel, in_hand)
+    np.testing.assert_allclose(eef @ in_hand, ref_target @ obj_rel)
 def test_native_rpent_policy_preserves_seed_method(monkeypatch):
     """Benchmark evaluation must leave RPent's native seed behavior intact."""
     monkeypatch.setenv("RPENT_MT3_FIXTURE_SEED_POLICY", "rpent")
