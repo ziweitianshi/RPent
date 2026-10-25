@@ -167,8 +167,11 @@ def _hooks(
 
     queries = [0]
     frozen: dict[str, np.ndarray] = {}
+    planning_refs: set[str] = set()
+    planning_context: dict[str, Any] = {}
 
     def body_poses(bodies: list[str]) -> dict[str, np.ndarray]:
+        planning_refs.update(bodies)
         if cfg is not None and cfg.freeze_poses and all(b in frozen for b in bodies):
             return {b: frozen[b].copy() for b in bodies}
         if cfg is not None and cfg.record_views:
@@ -191,18 +194,24 @@ def _hooks(
             frozen.setdefault(body, pose.copy())
         return {body: pose.copy() for body, pose in frozen.items() if body in bodies}
 
-    def strict_planning_options():
+    def strict_planning_options(lib=None, demo=None):
         if cfg is None or not cfg.strict_planning_scene:
             return {}
         from scipy.spatial.transform import Rotation
 
-        estimates = start_poses(
-            [
-                "white_yellow_mug_1_main",
-                "microwave_1_main",
-                "microwave_1_microdoorroot",
-            ]
-        )
+        # Use only bodies involved in this retrieved demo. Include every
+        # fixture ancestor so free articulated parts inherit their fixture's
+        # estimated placement. Free scene bodies without an estimate are
+        # handled by SceneChecker as absent, rather than left at defaults.
+        refs = set(planning_refs)
+        lib = lib or planning_context.get("library")
+        demo = planning_context.get("demo") if demo is None else demo
+        if lib is not None and demo is not None:
+            refs.update(
+                seg["ref"] for seg in lib.segments[demo]
+            )
+        requested = set(env.planning_bodies(sorted(refs))) if refs else set()
+        estimates = start_poses(sorted(requested)) if requested else {}
         return {
             "scene_estimates": {
                 name: np.r_[pose[:3, 3], Rotation.from_matrix(pose[:3, :3]).as_quat()[[3, 0, 1, 2]]].tolist()
@@ -216,7 +225,7 @@ def _hooks(
         opts.update(strict_planning_options())
         return env.check_paths(paths, opts)
 
-    return EnvHooks(
+    hooks = EnvHooks(
         step=primitives._step_env,
         eef_pose=lambda: pose_from_wxyz(env.poses([], [GRIP_SITE])[GRIP_SITE]),
         joint_positions=lambda: np.asarray(primitives._last_obs["states"][3:9], dtype=float),
@@ -233,6 +242,8 @@ def _hooks(
             goal, {**strict_planning_options(), **(options or {})}
         ),
     )
+    hooks._planning_context = planning_context
+    return hooks
 
 
 def execute(toolkit: Any, name: str, arguments: dict[str, Any]) -> None:
@@ -306,6 +317,9 @@ def run_mt3(
     )
     scene = hooks.body_poses(lib.ref_bodies)
     demo, retrieval = lib.nearest(scene, cfg)
+    # The planner scene must cover all references in this retrieved demo,
+    # including fixtures that are not the immediate segment target.
+    hooks._planning_context.update(library=lib, demo=demo)
     if cfg.retrieval == "reach" and hooks.check_paths is not None:
         demo, reach = reach_retrieval(lib, scene, cfg, hooks)
         retrieval = {**retrieval, "demo": demo, "reach": reach}

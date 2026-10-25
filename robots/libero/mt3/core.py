@@ -687,12 +687,11 @@ class MT3Runner:
         has_grasp_event = any(e[0] == "grasp" for e in seg.get("events", ()))
         grasping = self.cfg.grasp_retries > 0 and has_grasp_event
         ref = seg["ref"]
-        if self.cfg.placement_skill_by_ref:
-            for key, settings in self.cfg.placement_skill_by_ref.items():
-                reference = settings.get("reference", key)
-                if reference not in self._start_poses:
-                    pose = self.env.body_poses([reference])[reference]
-                    self._start_poses[reference] = pose.copy()
+        for key, settings in self.cfg.placement_skill_by_ref.items():
+            reference = settings.get("reference", key)
+            if any(reference in segment["ref"] for segment in self.segments) and reference not in self._start_poses:
+                pose = self.env.body_poses([reference])[reference]
+                self._start_poses[reference] = pose.copy()
         before = self.env.body_poses([ref])[ref] if has_grasp_event else None
         if has_grasp_event:
             self._start_poses.setdefault(ref, before.copy())
@@ -817,6 +816,7 @@ class MT3Runner:
         b = segment_bottleneck(self.eef, seg, self.cfg.radius)
         cpgen_grasp = (
             self.cfg.cpgen_grasp
+            and self.cfg.feasibility_check == "select"
             and self.gripper[b] <= 0
             and any(event[0] == "grasp" for event in seg.get("events", ()))
         )
@@ -827,7 +827,8 @@ class MT3Runner:
             demos=[self.demo] if cpgen_grasp else None,
             lengths=(self.cfg.approach_corridor,) if cpgen_grasp else (0.0, 0.1, 0.2),
             clearances=(self.cfg.transit_clearance,) if cpgen_grasp else (0.0, 0.06, 0.12, 0.2),
-            tilts=tuple(range(-75, 76, 5)) if cpgen_grasp else (0.0,),
+            tilts=(0.0, *(v for a in range(5, 76, 5) for v in (-float(a), float(a))))
+            if cpgen_grasp else (0.0,),
         )
         feasible = [
             x for x in candidates
@@ -841,6 +842,16 @@ class MT3Runner:
             log.update(
                 selection="none feasible; configured route", candidates=candidates
             )
+            if cpgen_grasp:
+                log["cpgen_grasp"] = {
+                    "attempted": True,
+                    "feasible": False,
+                    "theta_deg": None,
+                    "ik_pos_err_cm": None,
+                    "ik_rot_err_deg": None,
+                    "rrt_success": False,
+                    "rrt_path_length": None,
+                }
             return log
         # Shortest route; ties keep this runner's demo, then the shorter corridor.
         # Routes that touch no free object first, then the shortest; ties keep
@@ -1486,7 +1497,10 @@ class MT3Runner:
         )
 
     def _placement_enabled(self) -> bool:
-        return bool(self.cfg.placement_skill_by_ref)
+        return any(
+            self._placement_settings(segment["ref"]) is not None
+            for segment in self.segments
+        )
 
     def _segment_is_placement(self, k: int) -> bool:
         if k <= 0:

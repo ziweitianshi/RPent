@@ -70,6 +70,36 @@ def test_estimated_planning_state_ignores_live_scene_state():
     np.testing.assert_array_equal(checker.data.qpos[checker.arm_qpos], q)
 
 
+def test_strict_scene_moves_unestimated_free_bodies_out_and_keeps_fixtures():
+    import mujoco
+
+    joints = "".join(
+        f'<body name="robot0_link{k}" pos="0 0 .1"><joint name="robot0_joint{k}" range="-2 2"/><geom type="sphere" size=".01"/>'
+        + ('<site name="gripper0_right_grip_site" pos="0 0 .01"/>' if k == 7 else "")
+        + "</body>"
+        for k in range(1, 8)
+    )
+    xml = f'''<mujoco><worldbody>
+      <body name="robot0_base">{joints}</body>
+      <body name="estimated_obj"><freejoint/><geom type="sphere" size=".02"/></body>
+      <body name="unknown_obj"><freejoint/><geom type="sphere" size=".02"/></body>
+      <body name="fixture"><geom type="box" size=".1 .1 .1"/></body>
+    </worldbody></mujoco>'''
+    model = mujoco.MjModel.from_xml_string(xml)
+    checker = SceneChecker(
+        model, mujoco.MjData(model),
+        scene_estimates={"estimated_obj": [0.3, 0.2, 0.1, 1, 0, 0, 0]},
+        robot_joints=np.zeros(7),
+    )
+    checker._reset_copy()
+    unknown = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "unknown_obj")
+    fixture = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "fixture")
+    estimated = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "estimated_obj")
+    assert checker.data.xpos[unknown, 0] > 900
+    np.testing.assert_allclose(checker.data.xpos[fixture], model.body_pos[fixture])
+    np.testing.assert_allclose(checker.data.xpos[estimated], [0.3, 0.2, 0.1])
+
+
 def test_strict_checker_attaches_estimated_object_to_grip_site():
     import mujoco
 

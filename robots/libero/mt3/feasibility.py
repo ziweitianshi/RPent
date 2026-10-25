@@ -92,6 +92,17 @@ class SceneChecker:
                 for r in m.body_rootid
             ]
         )
+        if self.scene_estimates is not None:
+            # Model-default free objects have no trustworthy placement in
+            # strict mode. Move them far outside the scene unless an estimate
+            # was supplied; fixtures remain at their model defaults.
+            estimated = set(self.scene_estimates)
+            for root in range(m.nbody):
+                if not self.movable_body[root]:
+                    continue
+                name = self.body_names[root]
+                if name in estimated:
+                    continue
 
     # ---- state helpers ----
 
@@ -103,6 +114,13 @@ class SceneChecker:
             d.mocap_quat[:] = s.mocap_quat
         else:
             self.mj.mj_resetData(self.model, d)
+            estimated = set(self.scene_estimates)
+            for root in range(self.model.nbody):
+                if not self.movable_body[root] or self.body_names[root] in estimated:
+                    continue
+                jid = int(self.model.body_jntadr[root])
+                adr = int(self.model.jnt_qposadr[jid])
+                d.qpos[adr : adr + 3] = np.array([1000.0, 1000.0, 1000.0])
             for name, pose in self.scene_estimates.items():
                 bid = self.mj.mj_name2id(self.model, self.mj.mjtObj.mjOBJ_BODY, name)
                 if bid < 0:
@@ -138,6 +156,18 @@ class SceneChecker:
                         score = np.linalg.norm(d.xpos[bid] - target_pos) + 0.1 * np.linalg.norm(delta_rot)
                         if score < best[0]:
                             best = (score, angle)
+                    d.qpos[adr] = best[1]
+                elif jt == self.mj.mjtJoint.mjJNT_SLIDE and pose.size == 7:
+                    target_pos = pose[:3]
+                    base = d.qpos[adr]
+                    lo, hi = self.model.jnt_range[jid]
+                    best = (np.inf, base)
+                    for value in np.linspace(lo, hi, 181):
+                        d.qpos[adr] = value
+                        self.mj.mj_forward(self.model, d)
+                        score = np.linalg.norm(d.xpos[bid] - target_pos)
+                        if score < best[0]:
+                            best = (score, value)
                     d.qpos[adr] = best[1]
                 elif self.model.jnt_type[jid] != self.mj.mjtJoint.mjJNT_FREE:
                     raise ValueError(f"unsupported estimated joint type for {name}")

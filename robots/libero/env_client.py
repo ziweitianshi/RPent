@@ -131,6 +131,14 @@ class LiberoEnvClient(BaseEnvClient):
             "env.robot_joints", timeout_s=self._TIMEOUT_S["default"]
         )
 
+    def planning_bodies(self, references) -> list[str]:
+        """Reference bodies plus joint-bearing fixture ancestors (model metadata)."""
+        return self._client.call(
+            "env.planning_bodies",
+            kwargs={"references": list(references)},
+            timeout_s=self._TIMEOUT_S["default"],
+        )
+
     def plan_path(self, goal_pose, options=None) -> dict:
         """Plan a joint-space path to one grip-site pose."""
         return self._client.call(

@@ -148,6 +148,23 @@ def _attach_pose_reader(env):
         ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"robot0_joint{k}") for k in range(1, 8)]
         return [float(data.qpos[model.jnt_qposadr[j]]) for j in ids]
 
+    def planning_bodies(references):
+        """Reference bodies and joint-bearing fixture ancestors (model metadata only)."""
+        sim = env.env.sim
+        model = sim.model._model
+        import mujoco
+
+        names = set(references)
+        for name in references:
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            while bid > 0:
+                bid = int(model.body_parentid[bid])
+                if int(model.body_jntadr[bid]) >= 0:
+                    parent = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, bid)
+                    if parent:
+                        names.add(parent)
+        return sorted(names)
+
     def sim_state():
         """The flattened MuJoCo state (LIBERO demo ``states`` format)."""
         return [float(v) for v in env.get_sim_state()]
@@ -210,6 +227,7 @@ def _attach_pose_reader(env):
     env.goal_report = goal_report
     env.check_paths = check_paths
     env.robot_joints = robot_joints
+    env.planning_bodies = planning_bodies
     env.sim_state = sim_state
     env.plan_path = plan_path
     return env
@@ -368,6 +386,7 @@ class LiberoEnvFacade(BaseEnvFacade):
                 "env.poses": self.poses,
                 "env.check_paths": self.check_paths,
                 "env.robot_joints": self.robot_joints,
+                "env.planning_bodies": self.planning_bodies,
                 "env.sim_state": self.sim_state,
                 "env.goal_report": self.goal_report,
                 "env.plan_path": self.plan_path,
@@ -379,6 +398,7 @@ class LiberoEnvFacade(BaseEnvFacade):
         self._readonly_methods.add("env.sim_state")
         self._readonly_methods.add("env.goal_report")
         self._readonly_methods.add("env.plan_path")
+        self._readonly_methods.add("env.planning_bodies")
 
     # ---- shape helpers ----
 
@@ -527,6 +547,11 @@ class LiberoEnvFacade(BaseEnvFacade):
     def robot_joints(self) -> list[float]:
         return self._env.env.workers[self._env_idx].env_call(
             "robot_joints", args=[], target="self"
+        )
+
+    def planning_bodies(self, references) -> list[str]:
+        return self._env.env.workers[self._env_idx].env_call(
+            "planning_bodies", args=[list(references)], target="self"
         )
 
     def plan_path(self, goal_pose, options=None) -> dict:
