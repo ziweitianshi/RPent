@@ -70,6 +70,35 @@ def test_estimated_planning_state_ignores_live_scene_state():
     np.testing.assert_array_equal(checker.data.qpos[checker.arm_qpos], q)
 
 
+def test_strict_checker_attaches_estimated_object_to_grip_site():
+    import mujoco
+
+    joints = "".join(
+        f'<body name="robot0_link{k}" pos="0 0 .1"><joint name="robot0_joint{k}" range="-2 2"/><geom type="sphere" size=".01"/>'
+        + ('<site name="gripper0_right_grip_site" pos="0 0 .01"/>' if k == 7 else "")
+        + "</body>"
+        for k in range(1, 8)
+    )
+    xml = (
+        f'<mujoco><worldbody><body name="robot0_base">{joints}</body>'
+        '<body name="white_yellow_mug_1_main"><freejoint/><geom type="sphere" size=".02"/></body></worldbody></mujoco>'
+    )
+    model = mujoco.MjModel.from_xml_string(xml)
+    data = mujoco.MjData(model)
+    checker = SceneChecker(
+        model,
+        data,
+        scene_estimates={"white_yellow_mug_1_main": [0.4, 0.2, 0.1, 1, 0, 0, 0]},
+        robot_joints=np.zeros(7),
+        attached_body="white_yellow_mug_1_main",
+        attached_offset=np.eye(4),
+    )
+    checker._reset_copy()
+    held = checker.attached_body
+    checker._set_held_pose(held, checker.attached_offset)
+    np.testing.assert_allclose(checker.data.xpos[held], checker.data.site_xpos[checker.site], atol=1e-12)
+
+
 def test_grasp_tilt_recorded_metadata_supports_per_demo_flags():
     lib = SimpleNamespace(meta={"grasp_tilt_recorded": [False, True]})
     assert not grasp_tilt_recorded(lib, 0)

@@ -47,7 +47,7 @@ def _family(name: str) -> str:
 class SceneChecker:
     """Feasibility queries against one MuJoCo model/state (copied per query)."""
 
-    def __init__(self, model: Any, data: Any, *, scene_estimates=None, robot_joints=None):
+    def __init__(self, model: Any, data: Any, *, scene_estimates=None, robot_joints=None, attached_body=None, attached_offset=None):
         import mujoco
 
         self.mj = mujoco
@@ -57,12 +57,19 @@ class SceneChecker:
         # episode-start estimates. Never read scene qpos/qvel from ``data``.
         self.scene_estimates = scene_estimates
         self.robot_joints = robot_joints
+        self.attached_body_name = attached_body
+        self.attached_offset = None if attached_offset is None else np.asarray(attached_offset, dtype=float).reshape(4, 4)
         self.data = mujoco.MjData(model)
         m = model
         self.body_names = [
             mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, i) or ""
             for i in range(m.nbody)
         ]
+        self.attached_body = None
+        if attached_body is not None:
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, attached_body)
+            if bid >= 0:
+                self.attached_body = int(model.body_rootid[bid])
         self.site = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_SITE, GRIP_SITE)
         self.arm_joints = [
             mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, f"robot0_joint{k}")
@@ -150,6 +157,13 @@ class SceneChecker:
         pose[:3, :3] = self.data.xmat[b].reshape(3, 3)
         pose[:3, 3] = self.data.xpos[b]
         return pose
+
+    def _set_held_pose(self, held: int, offset: np.ndarray) -> None:
+        pose = self._site_pose() @ offset
+        adr = self.model.jnt_qposadr[self.model.body_jntadr[held]]
+        self.data.qpos[adr : adr + 3] = pose[:3, 3]
+        self.data.qpos[adr + 3 : adr + 7] = _quat_wxyz(pose[:3, :3])
+        self.mj.mj_forward(self.model, self.data)
 
     def held_body(self) -> int | None:
         """Free-floating body touching both finger pads in the live state, if any."""
@@ -267,10 +281,12 @@ class SceneChecker:
         # Contact queries on ``src`` are live simulator observations. Strict
         # mode deliberately avoids them; attached-object constraints must be
         # supplied explicitly by the caller in a future constraint planner.
-        held = None if self.scene_estimates is not None else self.held_body()
-        held_offset = None
-        if held is not None:
+        held = self.attached_body if self.attached_body is not None else (None if self.scene_estimates is not None else self.held_body())
+        held_offset = self.attached_offset
+        if held is not None and held_offset is None:
             held_offset = np.linalg.inv(self._site_pose()) @ self._body_pose(held)
+        if held is not None:
+            self._set_held_pose(held, held_offset)
         fams = set(ignore_families)
         ignore = {
             i for i, n in enumerate(self.body_names) if fams and _family(n) in fams
@@ -301,10 +317,7 @@ class SceneChecker:
                 first_ik_fail = i
             goal_pos_err, goal_rot_err = pos_err, rot_err
             if held is not None:
-                pose = self._site_pose() @ held_offset
-                adr = self.model.jnt_qposadr[self.model.body_jntadr[held]]
-                self.data.qpos[adr : adr + 3] = pose[:3, 3]
-                self.data.qpos[adr + 3 : adr + 7] = _quat_wxyz(pose[:3, :3])
+                self._set_held_pose(held, held_offset)
             now = ignore_tail if i >= len(path) - tail else ignore
             hits = [
                 h
@@ -369,10 +382,12 @@ class SceneChecker:
         self._reset_copy()
         start = self.data.qpos[self.arm_qpos].copy()
         self.q0 = start.copy()
-        held = self.held_body()
-        held_offset = None
-        if held is not None:
+        held = self.attached_body if self.attached_body is not None else self.held_body()
+        held_offset = self.attached_offset
+        if held is not None and held_offset is None:
             held_offset = np.linalg.inv(self._site_pose()) @ self._body_pose(held)
+        if held is not None:
+            self._set_held_pose(held, held_offset)
         pre = {h[:2] for h in self.collisions(held, depth, set())}
         movable_pairs: set[str] = set()
 
@@ -380,11 +395,7 @@ class SceneChecker:
             self.data.qpos[self.arm_qpos] = q
             self.mj.mj_forward(self.model, self.data)
             if held is not None:
-                pose = self._site_pose() @ held_offset
-                adr = self.model.jnt_qposadr[self.model.body_jntadr[held]]
-                self.data.qpos[adr : adr + 3] = pose[:3, 3]
-                self.data.qpos[adr + 3 : adr + 7] = _quat_wxyz(pose[:3, :3])
-                self.mj.mj_forward(self.model, self.data)
+                self._set_held_pose(held, held_offset)
 
         def valid(q: np.ndarray) -> bool:
             set_q(q)
@@ -480,7 +491,10 @@ def check_paths(sim: Any, paths: list, **kwargs: Any) -> list[dict[str, Any]]:
     """Check each path in ``paths`` against ``sim`` (robosuite MjSim)."""
     estimates = kwargs.pop("scene_estimates", None)
     joints = kwargs.pop("robot_joints", None)
-    checker = SceneChecker(sim.model._model, sim.data._data, scene_estimates=estimates, robot_joints=joints)
+    attached = kwargs.pop("attached_body", None)
+    attached_offset = kwargs.pop("attached_offset", None)
+    checker = SceneChecker(sim.model._model, sim.data._data, scene_estimates=estimates, robot_joints=joints,
+                           attached_body=attached, attached_offset=attached_offset)
     tails = kwargs.pop("tails", None) or [0] * len(paths)
     return [
         checker.check([np.asarray(p) for p in path], tail=t, **kwargs)
@@ -602,5 +616,8 @@ def plan_path(sim: Any, goal_pose: np.ndarray, **kwargs: Any) -> dict[str, Any]:
     """Plan from the live simulator state without modifying it."""
     estimates = kwargs.pop("scene_estimates", None)
     joints = kwargs.pop("robot_joints", None)
-    checker = SceneChecker(sim.model._model, sim.data._data, scene_estimates=estimates, robot_joints=joints)
+    attached = kwargs.pop("attached_body", None)
+    attached_offset = kwargs.pop("attached_offset", None)
+    checker = SceneChecker(sim.model._model, sim.data._data, scene_estimates=estimates, robot_joints=joints,
+                           attached_body=attached, attached_offset=attached_offset)
     return checker.plan(np.asarray(goal_pose), **kwargs)

@@ -90,6 +90,11 @@ class MT3Config:
     #: Build collision queries from model defaults, frozen start estimates, and
     #: arm joint proprioception instead of copying live scene qpos.
     strict_planning_scene: bool = False
+    #: Search grasp contact-frame rotations with strict DLS/collision planning.
+    cpgen_grasp: bool = False
+    #: Search insertion keypoint poses in yaw/roll while carrying the mug.
+    cpgen_placement: bool = False
+    cpgen_min_joint_margin_deg: float = 8.0
     #: Use joint-space RRT-Connect when all static alignment routes fail.
     rrt_fallback: bool = False
     feasibility_topk: int = 5
@@ -748,8 +753,29 @@ class MT3Runner:
             return self._segment(k)
         ref = self.segments[k]["ref"]
         live = self.env.body_poses([ref])[ref]
-        candidates = self._feasibility(k, live, 0.0)
-        feasible = [x for x in candidates if x["feasible"]]
+        seg = self.segments[k]
+        b = segment_bottleneck(self.eef, seg, self.cfg.radius)
+        cpgen_grasp = (
+            self.cfg.cpgen_grasp
+            and self.gripper[b] <= 0
+            and any(event[0] == "grasp" for event in seg.get("events", ()))
+        )
+        candidates = self._feasibility(
+            k,
+            live,
+            0.0,
+            demos=[self.demo] if cpgen_grasp else None,
+            lengths=(self.cfg.approach_corridor,) if cpgen_grasp else (0.0, 0.1, 0.2),
+            clearances=(self.cfg.transit_clearance,) if cpgen_grasp else (0.0, 0.06, 0.12, 0.2),
+            tilts=tuple(range(-75, 76, 5)) if cpgen_grasp else (0.0,),
+        )
+        feasible = [
+            x for x in candidates
+            if x["feasible"] and (
+                not cpgen_grasp
+                or x.get("min_joint_margin_deg", 0.0) >= self.cfg.cpgen_min_joint_margin_deg
+            )
+        ]
         if not feasible:
             log = self._segment(k)
             log.update(
@@ -762,12 +788,34 @@ class MT3Runner:
         pick = min(
             feasible,
             key=lambda x: (
+                abs(x.get("tilt", 0.0)) if cpgen_grasp else 0.0,
+                -x["min_joint_margin_deg"] if cpgen_grasp else 0.0,
                 x["first_movable_contact"] is not None,
                 x["n"],
                 x["demo"] != self.demo,
                 x["corridor"],
             ),
         )
+        preplanned = None
+        plan_metrics = None
+        if cpgen_grasp:
+            rows0 = self.lib.frames(pick["demo"])
+            seg0 = self.lib.segments[pick["demo"]][k]
+            eef0 = self.lib.eef[rows0]
+            b0 = segment_bottleneck(eef0, seg0, self.cfg.radius)
+            transform0, _ = self.cfg.transfer(
+                ref, live, self.lib.pose[ref][rows0.start + b0],
+                offset_recorded(self.lib, pick["demo"]),
+            )
+            theta = np.radians(pick.get("tilt", 0.0))
+            transform0 = tilt_about(
+                transform0, theta, eef0[seg0["c"]], self.cfg.grasp_tilt_axis
+            )
+            goal0 = transform0 @ eef0[b0]
+            if self.env.plan_path is not None:
+                plan_metrics = self.env.plan_path(goal0)
+                if plan_metrics.get("success"):
+                    preplanned = [np.asarray(p) for p in plan_metrics["path"]]
         saved = (
             self.demo,
             self.first,
@@ -789,9 +837,13 @@ class MT3Runner:
             transit_clearance=pick["clearance"],
             carry_clearance=0.0,
         )
+        if cpgen_grasp:
+            self._tilt = np.radians(pick.get("tilt", 0.0))
         try:
-            log = self._segment(k)
+            log = self._segment(k, precomputed_path=preplanned)
         finally:
+            if cpgen_grasp:
+                self._tilt = 0.0
             (
                 self.demo,
                 self.first,
@@ -808,6 +860,16 @@ class MT3Runner:
             },
             candidates=candidates,
         )
+        if cpgen_grasp:
+            log["cpgen_grasp"] = {
+                "theta_deg": pick.get("tilt", 0.0),
+                "ik_pos_err_cm": pick.get("goal_ik_pos_err_cm"),
+                "ik_rot_err_deg": pick.get("goal_ik_rot_err_deg"),
+                "joint_margin_deg": pick.get("min_joint_margin_deg"),
+                "max_penetration_cm": pick.get("max_penetration_cm"),
+                "rrt_success": bool(plan_metrics and plan_metrics.get("success")),
+                "rrt_path_length": None if plan_metrics is None else plan_metrics.get("path_length"),
+            }
         return log
 
     def _use_demo(self, demo: int) -> None:
@@ -1401,23 +1463,81 @@ class MT3Runner:
         target[:3, 3] += microwave[:3, 1] * float(settings.get("target_y", -0.05))
         target[:3, 3] += microwave[:3, 2] * float(settings.get("target_z", -0.066))
         target[:3, 3] += microwave[:3, 0] * float(settings.get("target_x", 0.02))
-        eef_target = target @ np.linalg.inv(in_hand)
         axis = microwave[:3, 1]
+        current = self.env.eef_pose()
+        placement_plan = None
+        selected_yaw = selected_roll = 0.0
+        if self.cfg.cpgen_placement:
+            candidates = []
+            for yaw_deg in (-20, -10, 0, 10, 20):
+                yaw_rot = Rotation.from_rotvec(microwave[:3, 2] * np.radians(yaw_deg)).as_matrix()
+                mug_rot = yaw_rot @ target[:3, :3]
+                for roll_deg in (-20, 0, 20):
+                    roll_rot = Rotation.from_rotvec(axis * np.radians(roll_deg)).as_matrix()
+                    eef_rot = roll_rot @ mug_rot @ in_hand[:3, :3].T
+                    eef_goal = np.eye(4)
+                    eef_goal[:3, :3] = eef_rot
+                    eef_goal[:3, 3] = target[:3, 3] - eef_rot @ in_hand[:3, 3]
+                    pre_goal = eef_goal.copy()
+                    pre_goal[:3, 3] -= axis * float(settings.get("preinsert_depth", 0.11))
+                    safe_goal = pre_goal.copy()
+                    safe_goal[:3, 3] += microwave[:3, 2] * float(settings.get("carry_height", 0.24))
+                    lift_goal = current.copy()
+                    lift_goal[:3, 3] += microwave[:3, 2] * float(settings.get("lift_height", 0.16))
+                    route = []
+                    origin = current
+                    for waypoint in (lift_goal, safe_goal, pre_goal, eef_goal):
+                        plan_step = max(self.cfg.align_step, 0.02)
+                        count = max(1, int(np.ceil(np.linalg.norm(waypoint[:3, 3] - origin[:3, 3]) / plan_step)))
+                        for index in range(1, count + 1):
+                            tau = index / count
+                            pose = waypoint.copy()
+                            pose[:3, 3] = origin[:3, 3] * (1 - tau) + waypoint[:3, 3] * tau
+                            pose[:3, :3] = slerp(origin[:3, :3], waypoint[:3, :3], tau)
+                            route.append(pose)
+                        origin = waypoint
+                    checker_options = {
+                        "ignore_families": ["table"],
+                        "tail_families": ["microwave_1"],
+                        "tails": [min(12, len(route))],
+                        "attached_body": mug_ref,
+                        "attached_offset": in_hand.tolist(),
+                    }
+                    result = self.env.check_paths([route], checker_options)[0]
+                    candidates.append((yaw_deg, roll_deg, eef_goal, pre_goal, safe_goal, lift_goal, route, result))
+            feasible = [
+                candidate for candidate in candidates
+                if candidate[-1].get("feasible")
+                and candidate[-1].get("min_joint_margin_deg", 0.0) >= self.cfg.cpgen_min_joint_margin_deg
+            ]
+            if feasible:
+                chosen = min(feasible, key=lambda x: (abs(x[0]) + abs(x[1]), -x[-1].get("min_joint_margin_deg", 0)))
+                selected_yaw, selected_roll, eef_target, pre, safe, lift, route, candidate_result = chosen
+                candidate_found = True
+                plan_options = {"attached_body": mug_ref, "attached_offset": in_hand.tolist()}
+                phases = [(lift, self._last_gripper), (safe, self._last_gripper), (pre, self._last_gripper), (eef_target, self._last_gripper)]
+            else:
+                eef_target = target @ np.linalg.inv(in_hand)
+                pre = eef_target.copy()
+                pre[:3, 3] -= axis * float(settings.get("preinsert_depth", 0.11))
+                safe = pre.copy()
+                safe[:3, 3] += microwave[:3, 2] * float(settings.get("carry_height", 0.24))
+                lift = current.copy()
+                lift[:3, 3] += microwave[:3, 2] * float(settings.get("lift_height", 0.16))
+                phases = [(lift, self._last_gripper), (safe, self._last_gripper), (pre, self._last_gripper), (eef_target, self._last_gripper)]
+                candidate_result = {"feasible": False, "candidate_count": len(candidates)}
+                candidate_found = False
+        else:
+            eef_target = target @ np.linalg.inv(in_hand)
+            pre = eef_target.copy()
+            pre[:3, 3] -= axis * float(settings.get("preinsert_depth", 0.11))
+            safe = pre.copy()
+            safe[:3, 3] += microwave[:3, 2] * float(settings.get("carry_height", 0.24))
+            lift = current.copy()
+            lift[:3, 3] += microwave[:3, 2] * float(settings.get("lift_height", 0.16))
+            phases = [(lift, self._last_gripper), (safe, self._last_gripper), (pre, self._last_gripper), (eef_target, self._last_gripper)]
         # Conservative geometric corridor: keep the wrist above cabinet top
         # (model top z=.20) until the pre-insert waypoint in front of opening.
-        pre = eef_target.copy()
-        pre[:3, 3] -= axis * float(settings.get("preinsert_depth", 0.11))
-        safe = pre.copy()
-        safe[:3, 3] += microwave[:3, 2] * float(settings.get("carry_height", 0.24))
-        current = self.env.eef_pose()
-        lift = current.copy()
-        lift[:3, 3] += microwave[:3, 2] * float(settings.get("lift_height", 0.16))
-        phases = [
-            (lift, self._last_gripper),
-            (safe, self._last_gripper),
-            (pre, self._last_gripper),
-            (eef_target, self._last_gripper),
-        ]
         log = {
             "segment": k,
             "ref": mug_ref,
@@ -1436,7 +1556,33 @@ class MT3Runner:
             ],
             "preinsert_depth_m": float(settings.get("preinsert_depth", 0.11)),
         }
+        if self.cfg.cpgen_placement:
+            log["cpgen_placement"] = {
+                "yaw_deg": selected_yaw,
+                "roll_deg": selected_roll,
+                "candidate_found": candidate_found,
+                "candidate_count": candidate_result.get("candidate_count", 15),
+                "attached_mug_collision_check": candidate_result,
+                "rrt_success": bool(placement_plan and placement_plan.get("success")),
+                "rrt_path_length": None if placement_plan is None else placement_plan.get("path_length"),
+            }
         current = self.env.eef_pose()
+        if self.cfg.cpgen_placement and candidate_found:
+            for pose in alignment_path(current, lift, self.cfg.align_step):
+                if not self._send(pose, self._last_gripper):
+                    return self._close(log, n0, "done during CP-Gen post-grasp lift")
+            current = self.env.eef_pose()
+            placement_plan = self.env.plan_path(safe, plan_options) if self.env.plan_path is not None else None
+            log["cpgen_placement"]["rrt_success"] = bool(placement_plan and placement_plan.get("success"))
+            log["cpgen_placement"]["rrt_path_length"] = None if placement_plan is None else placement_plan.get("path_length")
+            if placement_plan and placement_plan.get("success"):
+                for pose in placement_plan["path"]:
+                    if not self._send(np.asarray(pose), self._last_gripper):
+                        return self._close(log, n0, "done during CP-Gen RRT insertion approach")
+                current = self.env.eef_pose()
+                phases = [(pre, self._last_gripper), (eef_target, self._last_gripper)]
+            else:
+                phases = [(safe, self._last_gripper), (pre, self._last_gripper), (eef_target, self._last_gripper)]
         for waypoint, grip in phases:
             distance = float(np.linalg.norm(waypoint[:3, 3] - current[:3, 3]))
             count = max(1, int(np.ceil(distance / self.cfg.align_step)))

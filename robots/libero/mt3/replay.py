@@ -191,23 +191,29 @@ def _hooks(
             frozen.setdefault(body, pose.copy())
         return {body: pose.copy() for body, pose in frozen.items() if body in bodies}
 
-    def check_paths(paths, options=None):
-        opts = dict(options or {})
-        if cfg is not None and cfg.strict_planning_scene:
-            from scipy.spatial.transform import Rotation
+    def strict_planning_options():
+        if cfg is None or not cfg.strict_planning_scene:
+            return {}
+        from scipy.spatial.transform import Rotation
 
-            estimates = start_poses(
-                [
-                    "white_yellow_mug_1_main",
-                    "microwave_1_main",
-                    "microwave_1_microdoorroot",
-                ]
-            )
-            opts["scene_estimates"] = {
+        estimates = start_poses(
+            [
+                "white_yellow_mug_1_main",
+                "microwave_1_main",
+                "microwave_1_microdoorroot",
+            ]
+        )
+        return {
+            "scene_estimates": {
                 name: np.r_[pose[:3, 3], Rotation.from_matrix(pose[:3, :3]).as_quat()[[3, 0, 1, 2]]].tolist()
                 for name, pose in estimates.items()
-            }
-            opts["robot_joints"] = env.robot_joints()
+            },
+            "robot_joints": env.robot_joints(),
+        }
+
+    def check_paths(paths, options=None):
+        opts = dict(options or {})
+        opts.update(strict_planning_options())
         return env.check_paths(paths, opts)
 
     return EnvHooks(
@@ -217,7 +223,9 @@ def _hooks(
         start_pose=start_poses(["white_yellow_mug_1_main", "microwave_1_main"]),
         done=lambda: bool(env.terminated or env.truncated),
         check_paths=check_paths,
-        plan_path=lambda goal: env.plan_path(goal),
+        plan_path=lambda goal, options=None: env.plan_path(
+            goal, {**strict_planning_options(), **(options or {})}
+        ),
     )
 
 
