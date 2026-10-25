@@ -47,12 +47,16 @@ def _family(name: str) -> str:
 class SceneChecker:
     """Feasibility queries against one MuJoCo model/state (copied per query)."""
 
-    def __init__(self, model: Any, data: Any):
+    def __init__(self, model: Any, data: Any, *, scene_estimates=None, robot_joints=None):
         import mujoco
 
         self.mj = mujoco
         self.model = model
         self.src = data
+        # Strict-safe mode: build each query from model defaults and explicit
+        # episode-start estimates. Never read scene qpos/qvel from ``data``.
+        self.scene_estimates = scene_estimates
+        self.robot_joints = robot_joints
         self.data = mujoco.MjData(model)
         m = model
         self.body_names = [
@@ -86,10 +90,53 @@ class SceneChecker:
 
     def _reset_copy(self) -> None:
         d, s = self.data, self.src
-        d.qpos[:] = s.qpos
+        if self.scene_estimates is None:
+            d.qpos[:] = s.qpos
+            d.mocap_pos[:] = s.mocap_pos
+            d.mocap_quat[:] = s.mocap_quat
+        else:
+            self.mj.mj_resetData(self.model, d)
+            for name, pose in self.scene_estimates.items():
+                bid = self.mj.mj_name2id(self.model, self.mj.mjtObj.mjOBJ_BODY, name)
+                if bid < 0:
+                    continue
+                jid = int(self.model.body_jntadr[bid])
+                if jid < 0:
+                    pose = np.asarray(pose, dtype=float)
+                    target_rot = np.empty(9)
+                    self.mj.mju_quat2Mat(target_rot, pose[3:])
+                    self.mj.mj_forward(self.model, d)
+                    if pose.size != 7 or np.linalg.norm(d.xpos[bid] - pose[:3]) > 0.01 or np.linalg.norm(d.xmat[bid].reshape(3, 3) - target_rot.reshape(3, 3)) > 0.1:
+                        raise ValueError(f"estimated static body {name} differs from model defaults")
+                    continue
+                jt = self.model.jnt_type[jid]
+                adr = int(self.model.jnt_qposadr[jid])
+                pose = np.asarray(pose, dtype=float)
+                if jt == self.mj.mjtJoint.mjJNT_FREE and pose.size == 7:
+                    d.qpos[adr : adr + 7] = pose
+                elif jt == self.mj.mjtJoint.mjJNT_HINGE and pose.size == 7:
+                    # Estimate articulated fixture angle from the observed
+                    # hinge-body transform. Search only this one joint while
+                    # all other state remains at model defaults.
+                    target_pos = pose[:3]
+                    target_rot = np.empty(9)
+                    self.mj.mju_quat2Mat(target_rot, pose[3:])
+                    target_rot = target_rot.reshape(3, 3)
+                    lo, hi = self.model.jnt_range[jid]
+                    best = (np.inf, d.qpos[adr])
+                    for angle in np.linspace(lo, hi, 181):
+                        d.qpos[adr] = angle
+                        self.mj.mj_forward(self.model, d)
+                        delta_rot = d.xmat[bid].reshape(3, 3) - target_rot
+                        score = np.linalg.norm(d.xpos[bid] - target_pos) + 0.1 * np.linalg.norm(delta_rot)
+                        if score < best[0]:
+                            best = (score, angle)
+                    d.qpos[adr] = best[1]
+                elif self.model.jnt_type[jid] != self.mj.mjtJoint.mjJNT_FREE:
+                    raise ValueError(f"unsupported estimated joint type for {name}")
+            if self.robot_joints is not None:
+                d.qpos[self.arm_qpos] = np.asarray(self.robot_joints, dtype=float)
         d.qvel[:] = 0.0
-        d.mocap_pos[:] = s.mocap_pos
-        d.mocap_quat[:] = s.mocap_quat
         self.mj.mj_kinematics(self.model, d)
 
     def _site_pose(self) -> np.ndarray:
@@ -217,7 +264,10 @@ class SceneChecker:
         """
         self._reset_copy()
         self.q0 = self.data.qpos[self.arm_qpos].copy()
-        held = self.held_body()
+        # Contact queries on ``src`` are live simulator observations. Strict
+        # mode deliberately avoids them; attached-object constraints must be
+        # supplied explicitly by the caller in a future constraint planner.
+        held = None if self.scene_estimates is not None else self.held_body()
         held_offset = None
         if held is not None:
             held_offset = np.linalg.inv(self._site_pose()) @ self._body_pose(held)
@@ -428,7 +478,9 @@ def _quat_wxyz(rot: np.ndarray) -> np.ndarray:
 
 def check_paths(sim: Any, paths: list, **kwargs: Any) -> list[dict[str, Any]]:
     """Check each path in ``paths`` against ``sim`` (robosuite MjSim)."""
-    checker = SceneChecker(sim.model._model, sim.data._data)
+    estimates = kwargs.pop("scene_estimates", None)
+    joints = kwargs.pop("robot_joints", None)
+    checker = SceneChecker(sim.model._model, sim.data._data, scene_estimates=estimates, robot_joints=joints)
     tails = kwargs.pop("tails", None) or [0] * len(paths)
     return [
         checker.check([np.asarray(p) for p in path], tail=t, **kwargs)
@@ -548,5 +600,7 @@ def _resample_pose_path(path, step):
 
 def plan_path(sim: Any, goal_pose: np.ndarray, **kwargs: Any) -> dict[str, Any]:
     """Plan from the live simulator state without modifying it."""
-    checker = SceneChecker(sim.model._model, sim.data._data)
+    estimates = kwargs.pop("scene_estimates", None)
+    joints = kwargs.pop("robot_joints", None)
+    checker = SceneChecker(sim.model._model, sim.data._data, scene_estimates=estimates, robot_joints=joints)
     return checker.plan(np.asarray(goal_pose), **kwargs)

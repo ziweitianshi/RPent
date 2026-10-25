@@ -191,13 +191,32 @@ def _hooks(
             frozen.setdefault(body, pose.copy())
         return {body: pose.copy() for body, pose in frozen.items() if body in bodies}
 
+    def check_paths(paths, options=None):
+        opts = dict(options or {})
+        if cfg is not None and cfg.strict_planning_scene:
+            from scipy.spatial.transform import Rotation
+
+            estimates = start_poses(
+                [
+                    "white_yellow_mug_1_main",
+                    "microwave_1_main",
+                    "microwave_1_microdoorroot",
+                ]
+            )
+            opts["scene_estimates"] = {
+                name: np.r_[pose[:3, 3], Rotation.from_matrix(pose[:3, :3]).as_quat()[[3, 0, 1, 2]]].tolist()
+                for name, pose in estimates.items()
+            }
+            opts["robot_joints"] = env.robot_joints()
+        return env.check_paths(paths, opts)
+
     return EnvHooks(
         step=primitives._step_env,
         eef_pose=lambda: pose_from_wxyz(env.poses([], [GRIP_SITE])[GRIP_SITE]),
         body_poses=body_poses,
         start_pose=start_poses(["white_yellow_mug_1_main", "microwave_1_main"]),
         done=lambda: bool(env.terminated or env.truncated),
-        check_paths=lambda paths, options=None: env.check_paths(paths, options),
+        check_paths=check_paths,
         plan_path=lambda goal: env.plan_path(goal),
     )
 

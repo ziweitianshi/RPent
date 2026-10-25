@@ -29,7 +29,7 @@ from robots.libero.mt3.core import (
     segment_bottleneck,
     tilt_about,
 )
-from robots.libero.mt3.feasibility import _rrt_connect, _shortcut_path
+from robots.libero.mt3.feasibility import SceneChecker, _rrt_connect, _shortcut_path
 
 
 def test_native_rpent_policy_preserves_seed_method(monkeypatch):
@@ -42,6 +42,32 @@ def test_native_rpent_policy_preserves_seed_method(monkeypatch):
     assert env.seed is seed
     env.seed(9)
     assert calls == [9]
+
+
+def test_estimated_planning_state_ignores_live_scene_state():
+    """Strict planning starts from model defaults + supplied estimates/proprioception."""
+    import mujoco
+
+    joints = "".join(
+        f'<body name="robot0_link{k}" pos="0 0 .1"><joint name="robot0_joint{k}" range="-2 2"/><geom type="sphere" size=".01"/>'
+        + ('<site name="gripper0_right_grip_site" pos="0 0 .01"/>' if k == 7 else "")
+        + '</body>'
+        for k in range(1, 8)
+    )
+    xml = f'<mujoco><worldbody><body name="robot0_base">{joints}</body><body name="white_yellow_mug_1_main"><freejoint/><geom type="sphere" size=".02"/></body></worldbody></mujoco>'
+    model = mujoco.MjModel.from_xml_string(xml)
+    live = mujoco.MjData(model)
+    estimates = {"white_yellow_mug_1_main": [0.4, 0.2, 0.1, 1, 0, 0, 0]}
+    q = np.linspace(-0.3, 0.3, 7)
+    checker = SceneChecker(model, live, scene_estimates=estimates, robot_joints=q)
+    live.qpos[:] = 0.7
+    checker._reset_copy()
+    first = checker.data.qpos.copy()
+    live.qpos[:] = -0.8
+    live.qvel[:] = 1.0
+    checker._reset_copy()
+    np.testing.assert_array_equal(checker.data.qpos, first)
+    np.testing.assert_array_equal(checker.data.qpos[checker.arm_qpos], q)
 
 
 def test_grasp_tilt_recorded_metadata_supports_per_demo_flags():

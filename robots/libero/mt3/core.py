@@ -87,6 +87,9 @@ class MT3Config:
     #: feasible candidate (its demo, corridor and transit height), or the
     #: configured route when none is feasible. "" disables the check.
     feasibility_check: str = ""
+    #: Build collision queries from model defaults, frozen start estimates, and
+    #: arm joint proprioception instead of copying live scene qpos.
+    strict_planning_scene: bool = False
     #: Use joint-space RRT-Connect when all static alignment routes fail.
     rrt_fallback: bool = False
     feasibility_topk: int = 5

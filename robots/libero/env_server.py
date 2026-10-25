@@ -139,6 +139,15 @@ def _attach_pose_reader(env):
 
         return _check(env.env.sim, paths, **(options or {}))
 
+    def robot_joints():
+        """Current Panda arm joint proprioception, excluding scene state."""
+        sim = env.env.sim
+        model, data = sim.model._model, sim.data._data
+        import mujoco
+
+        ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"robot0_joint{k}") for k in range(1, 8)]
+        return [float(data.qpos[model.jnt_qposadr[j]]) for j in ids]
+
     def sim_state():
         """The flattened MuJoCo state (LIBERO demo ``states`` format)."""
         return [float(v) for v in env.get_sim_state()]
@@ -200,6 +209,7 @@ def _attach_pose_reader(env):
     env.read_poses = read_poses
     env.goal_report = goal_report
     env.check_paths = check_paths
+    env.robot_joints = robot_joints
     env.sim_state = sim_state
     env.plan_path = plan_path
     return env
@@ -357,6 +367,7 @@ class LiberoEnvFacade(BaseEnvFacade):
                 "env.get_task_language": self.get_task_language,
                 "env.poses": self.poses,
                 "env.check_paths": self.check_paths,
+                "env.robot_joints": self.robot_joints,
                 "env.sim_state": self.sim_state,
                 "env.goal_report": self.goal_report,
                 "env.plan_path": self.plan_path,
@@ -511,6 +522,11 @@ class LiberoEnvFacade(BaseEnvFacade):
             "check_paths",
             args=[[np.asarray(p).tolist() for p in paths], options or {}],
             target="self",
+        )
+
+    def robot_joints(self) -> list[float]:
+        return self._env.env.workers[self._env_idx].env_call(
+            "robot_joints", args=[], target="self"
         )
 
     def plan_path(self, goal_pose, options=None) -> dict:

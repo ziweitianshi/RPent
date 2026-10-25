@@ -125,6 +125,12 @@ class LiberoEnvClient(BaseEnvClient):
             timeout_s=600,
         )
 
+    def robot_joints(self) -> list[float]:
+        """Current Panda arm joint proprioception."""
+        return self._client.call(
+            "env.robot_joints", timeout_s=self._TIMEOUT_S["default"]
+        )
+
     def plan_path(self, goal_pose, options=None) -> dict:
         """Plan a joint-space path to one grip-site pose."""
         return self._client.call(
