@@ -33,6 +33,59 @@ from robots.libero.mt3.core import (
 from robots.libero.mt3.feasibility import SceneChecker, _rrt_connect, _shortcut_path
 
 
+def test_cpgenfeas_flags_preserve_legacy_defaults():
+    cfg = MT3Config()
+    assert not cfg.cpgen_grasp_strict_ik
+    assert not cfg.cpgen_grasp_local_check
+    assert not cfg.cpgen_grasp_contact_tolerance
+    assert not cfg.cpgen_grasp_rrt_fallback
+
+
+def test_cpgen_strict_ik_rejects_intermediate_and_goal_errors():
+    from robots.libero.mt3.core import _cpgen_ik_valid
+
+    assert _cpgen_ik_valid(
+        {"first_ik_fail": None, "goal_ik_pos_err_cm": 0.9, "goal_ik_rot_err_deg": 4.0},
+        0.01, 5.0,
+    )
+    assert not _cpgen_ik_valid(
+        {"first_ik_fail": 3, "goal_ik_pos_err_cm": 0.5, "goal_ik_rot_err_deg": 1.0},
+        0.01, 5.0,
+    )
+    assert not _cpgen_ik_valid(
+        {"first_ik_fail": None, "goal_ik_pos_err_cm": 1.1, "goal_ik_rot_err_deg": 1.0},
+        0.01, 5.0,
+    )
+
+
+def test_cpgen_local_route_excludes_replaced_transit():
+    from robots.libero.mt3.core import _cpgen_local_path
+
+    goal, contact, lift = object(), [2], [3]
+    assert _cpgen_local_path(goal, contact + lift) == [goal, 2, 3]
+    assert _cpgen_local_path(goal, []) == [goal]
+
+
+def test_cpgen_contact_tolerance_is_limited_to_fingers_and_support():
+    from robots.libero.mt3.feasibility import _contact_exceeds_tolerance
+
+    assert not _contact_exceeds_tolerance("gripper0_left_finger", 0.019, True, 0.02, 0.005)
+    assert _contact_exceeds_tolerance("robot0_link6", 0.006, True, 0.02, 0.005)
+    assert _contact_exceeds_tolerance("gripper0_left_finger", 0.006, False, 0.02, 0.005)
+    assert _contact_exceeds_tolerance("gripper0_left_finger", 0.021, True, 0.02, 0.005)
+
+
+def test_cpgen_rrt_fallback_order_is_bounded_and_zero_first():
+    from robots.libero.mt3.core import _cpgen_rrt_order
+
+    candidates = [
+        {"tilt": 55, "min_joint_margin_deg": 40},
+        {"tilt": -5, "min_joint_margin_deg": 30},
+        {"tilt": 0, "min_joint_margin_deg": 20},
+    ]
+    ordered = _cpgen_rrt_order(candidates, 2)
+    assert [row["tilt"] for row in ordered] == [0, -5]
+    assert len(_cpgen_rrt_order(candidates, 0)) == 1
 def test_held_object_retarget_places_object_on_demo_relative_pose():
     ref_target = np.eye(4)
     ref_target[:3, 3] = [0.4, -0.2, 0.3]

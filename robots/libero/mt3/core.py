@@ -92,6 +92,15 @@ class MT3Config:
     strict_planning_scene: bool = False
     #: Search grasp contact-frame rotations with strict DLS/collision planning.
     cpgen_grasp: bool = False
+    cpgen_grasp_strict_ik: bool = False
+    cpgen_grasp_local_check: bool = False
+    cpgen_grasp_contact_tolerance: bool = False
+    cpgen_grasp_rrt_fallback: bool = False
+    cpgen_grasp_ik_pos_tol: float = 0.01
+    cpgen_grasp_ik_rot_tol_deg: float = 5.0
+    cpgen_grasp_support_penetration: float = 0.02
+    cpgen_grasp_general_penetration: float = 0.005
+    cpgen_grasp_fallback_candidates: int = 8
     #: Plan the approach to the door-closing segment with strict-scene RRT.
     cpgen_door_rrt: bool = False
     #: Search insertion keypoint poses in yaw/roll while carrying the mug.
@@ -416,6 +425,49 @@ def _family(name: str) -> str:
         if part.isdigit():
             return "_".join(parts[: i + 1])
     return name
+
+
+def _cpgen_local_path(goal, grasp_and_lift):
+    """Executed grasp-local waypoints; alignment transit is planned by RRT."""
+    return [goal] + list(grasp_and_lift)
+
+
+def _cpgen_rrt_order(candidates, limit):
+    """Bounded preference order: preserve theta zero, then smallest tilt."""
+    ordered = sorted(
+        candidates,
+        key=lambda x: (
+            abs(x.get("tilt", 0.0)), -x.get("min_joint_margin_deg", 0.0),
+            x.get("first_movable_contact") is not None, x.get("n", 0),
+            x.get("demo", 0), x.get("corridor", 0.0),
+        ),
+    )
+    return ordered[:max(1, int(limit))]
+
+
+def _cpgen_ik_valid(result, pos_tol_m: float, rot_tol_deg: float) -> bool:
+    return (
+        result.get("first_ik_fail") is None
+        and result.get("goal_ik_pos_err_cm", float("inf")) <= 100 * pos_tol_m
+        and result.get("goal_ik_rot_err_deg", float("inf")) <= rot_tol_deg
+    )
+
+
+def _cpgen_rejection_reason(candidate, min_joint_margin_deg: float) -> str | None:
+    if candidate is None:
+        return "candidate_missing"
+    if candidate.get("infeasible_reason"):
+        return str(candidate["infeasible_reason"])
+    if candidate.get("first_collision") is not None:
+        pairs = candidate.get("collision_pairs", [])
+        return "collision:" + (pairs[0] if pairs else "unknown_pair")
+    if candidate.get("first_ik_fail") is not None:
+        return "grasp_local_ik"
+    if candidate.get("min_joint_margin_deg", 0.0) < min_joint_margin_deg:
+        return "joint_margin"
+    if not candidate.get("feasible", False):
+        return "candidate_infeasible"
+    return None
 
 
 def dmp_path(
@@ -896,6 +948,10 @@ class MT3Runner:
             x for x in candidates
             if x["feasible"] and (
                 not cpgen_grasp
+                or (
+                    self.cfg.cpgen_grasp_rrt_fallback
+                    and x.get("tilt", 0.0) == 0.0
+                )
                 or x.get("min_joint_margin_deg", 0.0) >= self.cfg.cpgen_min_joint_margin_deg
             )
         ]
@@ -931,24 +987,79 @@ class MT3Runner:
         )
         preplanned = None
         plan_metrics = None
+        initial_pick = pick
+        rrt_attempt_count = 0
+        rrt_failed_tilts = []
         if cpgen_grasp:
-            rows0 = self.lib.frames(pick["demo"])
-            seg0 = self.lib.segments[pick["demo"]][k]
-            eef0 = self.lib.eef[rows0]
-            b0 = segment_bottleneck(eef0, seg0, self.cfg.radius)
-            transform0, _ = self.cfg.transfer(
-                ref, live, self.lib.pose[ref][rows0.start + b0],
-                offset_recorded(self.lib, pick["demo"]),
-            )
-            theta = np.radians(pick.get("tilt", 0.0))
-            transform0 = tilt_about(
-                transform0, theta, eef0[seg0["c"]], self.cfg.grasp_tilt_axis
-            )
-            goal0 = transform0 @ eef0[b0]
-            if self.env.plan_path is not None:
-                plan_metrics = self.env.plan_path(goal0)
-                if plan_metrics.get("success"):
-                    preplanned = [np.asarray(p) for p in plan_metrics["path"]]
+            attempts = _cpgen_rrt_order(feasible, self.cfg.cpgen_grasp_fallback_candidates)
+            if self.cfg.cpgen_grasp_rrt_fallback:
+                for candidate in attempts:
+                    rrt_attempt_count += 1
+                    rows0 = self.lib.frames(candidate["demo"])
+                    seg0 = self.lib.segments[candidate["demo"]][k]
+                    eef0 = self.lib.eef[rows0]
+                    b0 = segment_bottleneck(eef0, seg0, self.cfg.radius)
+                    transform0, _ = self.cfg.transfer(
+                        ref, live, self.lib.pose[ref][rows0.start + b0],
+                        offset_recorded(self.lib, candidate["demo"]),
+                    )
+                    transform0 = tilt_about(
+                        transform0, np.radians(candidate.get("tilt", 0.0)),
+                        eef0[seg0["c"]], self.cfg.grasp_tilt_axis,
+                    )
+                    delta0 = self._grasp_delta(k, candidate["demo"], b0)
+                    if delta0 is None:
+                        delta0 = np.eye(4)
+                    metrics = (
+                        self.env.plan_path(transform0 @ eef0[b0] @ delta0)
+                        if self.env.plan_path is not None else {"success": False}
+                    )
+                    if metrics.get("success"):
+                        pick, plan_metrics = candidate, metrics
+                        preplanned = [np.asarray(p) for p in metrics["path"]]
+                        break
+                    rrt_failed_tilts.append(candidate.get("tilt", 0.0))
+                if preplanned is None:
+                    theta0 = next((x for x in candidates if x.get("tilt", 0.0) == 0.0), None)
+                    log = self._segment(k)
+                    theta0_reason = _cpgen_rejection_reason(
+                        theta0, self.cfg.cpgen_min_joint_margin_deg
+                    )
+                    if theta0_reason is None and 0.0 in rrt_failed_tilts:
+                        theta0_reason = "rrt_failed"
+                    log.update(selection="rrt failed; configured route", candidates=candidates)
+                    log["cpgen_grasp"] = {
+                        "attempted": True, "feasible": False, "theta_deg": 0.0,
+                        "theta0_rejection_reason": theta0_reason,
+                        "rrt_success": False, "fallback_used": "plain_demo_theta0",
+                        "rrt_attempted_candidates": rrt_attempt_count,
+                    }
+                    return log
+            else:
+                rows0 = self.lib.frames(pick["demo"])
+                seg0 = self.lib.segments[pick["demo"]][k]
+                eef0 = self.lib.eef[rows0]
+                b0 = segment_bottleneck(eef0, seg0, self.cfg.radius)
+                transform0, _ = self.cfg.transfer(
+                    ref, live, self.lib.pose[ref][rows0.start + b0],
+                    offset_recorded(self.lib, pick["demo"]),
+                )
+                transform0 = tilt_about(
+                    transform0, np.radians(pick.get("tilt", 0.0)),
+                    eef0[seg0["c"]], self.cfg.grasp_tilt_axis,
+                )
+                delta0 = (
+                    self._grasp_delta(k, pick["demo"], b0)
+                    if self.cfg.cpgen_grasp_local_check or self.cfg.cpgen_grasp_rrt_fallback
+                    else np.eye(4)
+                )
+                if delta0 is None:
+                    delta0 = np.eye(4)
+                goal0 = transform0 @ eef0[b0] @ delta0
+                if self.env.plan_path is not None:
+                    plan_metrics = self.env.plan_path(goal0)
+                    if plan_metrics.get("success"):
+                        preplanned = [np.asarray(p) for p in plan_metrics["path"]]
         saved = (
             self.demo,
             self.first,
@@ -1002,6 +1113,19 @@ class MT3Runner:
                 "max_penetration_cm": pick.get("max_penetration_cm"),
                 "rrt_success": bool(plan_metrics and plan_metrics.get("success")),
                 "rrt_path_length": None if plan_metrics is None else plan_metrics.get("path_length"),
+                "theta0_rejection_reason": _cpgen_rejection_reason(
+                    next((x for x in candidates if x.get("tilt", 0.0) == 0.0), None),
+                    self.cfg.cpgen_min_joint_margin_deg,
+                ),
+                "fallback_used": (
+                    f"next_candidate_theta_{pick.get('tilt', 0.0)}"
+                    if self.cfg.cpgen_grasp_rrt_fallback and pick is not initial_pick
+                    else "none" if preplanned
+                    else "existing_no_plan_behavior" if not self.cfg.cpgen_grasp_rrt_fallback
+                    else "plain_demo_theta0"
+                ),
+                "rrt_attempted_candidates": rrt_attempt_count,
+                "candidate_retry_used": bool(self.cfg.cpgen_grasp_rrt_fallback and pick is not initial_pick),
             }
         return log
 
@@ -1839,6 +1963,12 @@ class MT3Runner:
         """
         lib, seg = self.lib, self.segments[k]
         ref = seg["ref"]
+        cpgen_grasp = (
+            self.cfg.cpgen_grasp
+            and self.cfg.feasibility_check == "select"
+            and self.gripper[segment_bottleneck(self.eef, seg, self.cfg.radius)] <= 0
+            and any(event[0] == "grasp" for event in seg.get("events", ()))
+        )
         if demos is None:
             scene = self.env.body_poses(lib.ref_bodies)
             demos = [self.demo] + [
@@ -1904,7 +2034,29 @@ class MT3Runner:
                 if placing
                 else {"ignore_families": [_family(ref), "table"]}
             )
+        if cpgen_grasp and self.cfg.cpgen_grasp_contact_tolerance:
+            options = dict(options or {})
+            options.update(
+                contact_tolerance=True,
+                support_body=ref,
+                support_penetration=self.cfg.cpgen_grasp_support_penetration,
+                general_penetration=self.cfg.cpgen_grasp_general_penetration,
+            )
+        if cpgen_grasp and self.cfg.cpgen_grasp_strict_ik:
+            options = dict(options or {})
+            options.update(
+                ik_pos_tol=self.cfg.cpgen_grasp_ik_pos_tol,
+                ik_rot_tol=self.cfg.cpgen_grasp_ik_rot_tol_deg,
+            )
         results = self.env.check_paths(paths, options) if paths else []
+        if cpgen_grasp and self.cfg.cpgen_grasp_strict_ik:
+            for result in results:
+                if not _cpgen_ik_valid(
+                    result, self.cfg.cpgen_grasp_ik_pos_tol,
+                    self.cfg.cpgen_grasp_ik_rot_tol_deg,
+                ):
+                    result["feasible"] = False
+                    result["infeasible_reason"] = "grasp_local_ik"
         return [dict(n, **r) for n, r in zip(names, results)]
 
     def _candidate_routes(
@@ -1931,6 +2083,12 @@ class MT3Runner:
         execution does.
         """
         delta = np.eye(4) if grasp_delta is None else grasp_delta
+        cpgen_local = (
+            self.cfg.cpgen_grasp
+            and self.cfg.feasibility_check == "select"
+            and self.gripper[b] <= 0
+            and any(event[0] == "grasp" for event in other.get("events", ()))
+        )
         goal = transform @ eef[b] @ delta
         # The source interaction up to contact: it must not run into a
         # fixture either (the reference object itself is ignored).
@@ -1955,7 +2113,18 @@ class MT3Runner:
                 for via in vias:
                     head = lead[0] if lead else goal
                     path = via_path(start, head, via, self.cfg.align_step, clearance)
-                    paths.append(path + lead[1:] + ([goal] if lead else []) + reach_in)
+                    if self.cfg.cpgen_grasp_local_check and cpgen_local:
+                        # RRT replaces start->pre-grasp. Validate only the
+                        # transferred grasp corridor and post-contact lift.
+                        local_end = min(int(other.get("end", other["c"] + 1)), len(eef))
+                        grasp_and_lift = [
+                            transform @ eef[f] @ delta
+                            for f in range(b + 1, local_end)
+                        ]
+                        local = _cpgen_local_path(goal, grasp_and_lift)
+                        paths.append(local or [goal])
+                    else:
+                        paths.append(path + lead[1:] + ([goal] if lead else []) + reach_in)
                     names.append(
                         dict(tag, corridor=length, clearance=clearance, via=via)
                     )

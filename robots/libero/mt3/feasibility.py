@@ -44,6 +44,12 @@ def _family(name: str) -> str:
     return name
 
 
+def _contact_exceeds_tolerance(mover: str, penetration: float, is_support: bool,
+                               support_tolerance: float, general_tolerance: float) -> bool:
+    tolerance = support_tolerance if "finger" in mover and is_support else general_tolerance
+    return penetration > tolerance
+
+
 class SceneChecker:
     """Feasibility queries against one MuJoCo model/state (copied per query)."""
 
@@ -299,6 +305,10 @@ class SceneChecker:
         ignore_families: tuple[str, ...] = (),
         tail_families: tuple[str, ...] = (),
         tail: int = 0,
+        contact_tolerance: bool = False,
+        support_body: str | None = None,
+        support_penetration: float = 0.02,
+        general_penetration: float = 0.005,
     ) -> dict[str, Any]:
         """Walk ``path`` (4x4 grip-site poses) from the live state.
 
@@ -317,6 +327,37 @@ class SceneChecker:
             held_offset = np.linalg.inv(self._site_pose()) @ self._body_pose(held)
         if held is not None:
             self._set_held_pose(held, held_offset)
+        support_roots: set[int] = set()
+        if contact_tolerance and support_body:
+            # Infer the support from frozen scene geometry: choose the closest
+            # non-robot geom directly below the estimated object's footprint.
+            self.mj.mj_forward(self.model, self.data)
+            sid = self.mj.mj_name2id(self.model, self.mj.mjtObj.mjOBJ_BODY, support_body)
+            if sid >= 0:
+                root = int(self.model.body_rootid[sid])
+                object_geoms = [g for g in range(self.model.ngeom)
+                                if int(self.model.body_rootid[self.model.geom_bodyid[g]]) == root]
+                object_bottom = min(
+                    self.data.geom_xpos[g, 2] - float(np.max(self.model.geom_size[g]))
+                    for g in object_geoms
+                ) if object_geoms else np.inf
+                object_radius = max(
+                    (float(np.linalg.norm(self.model.geom_size[g, :2])) for g in object_geoms),
+                    default=0.0,
+                )
+                for g in range(self.model.ngeom):
+                    body = int(self.model.geom_bodyid[g])
+                    other_root = int(self.model.body_rootid[body])
+                    if self.robot_body[body] or other_root == root:
+                        continue
+                    top = self.data.geom_xpos[g, 2] + float(np.max(self.model.geom_size[g]))
+                    horizontal = np.linalg.norm(self.data.geom_xpos[g, :2] - self.data.xpos[sid, :2])
+                    support_radius = float(np.linalg.norm(self.model.geom_size[g, :2]))
+                    if (
+                        abs(object_bottom - top) <= support_penetration
+                        and horizontal <= object_radius + support_radius + 0.01
+                    ):
+                        support_roots.add(other_root)
         fams = set(ignore_families)
         ignore = {
             i for i, n in enumerate(self.body_names) if fams and _family(n) in fams
@@ -329,7 +370,8 @@ class SceneChecker:
         # finger already against a wall) count only once they press 5 mm
         # deeper than at the start.
         pre: dict[tuple[str, str], float] = {}
-        for h in self.collisions(held, depth, ignore):
+        query_depth = max(general_penetration, support_penetration) if contact_tolerance else depth
+        for h in self.collisions(held, query_depth, ignore):
             pre[h[:2]] = max(pre.get(h[:2], 0.0), h[2])
         first_collision, first_ik_fail, bodies = None, None, set()
         first_movable, movable_pairs = None, set()
@@ -351,8 +393,15 @@ class SceneChecker:
             now = ignore_tail if i >= len(path) - tail else ignore
             hits = [
                 h
-                for h in self.collisions(held, depth, now)
+                for h in self.collisions(held, query_depth, now)
                 if h[2] > pre.get(h[:2], -1.0) + 0.005
+                and (
+                    not contact_tolerance
+                    or _contact_exceeds_tolerance(
+                        h[0], h[2], self._body_root_id(h[1]) in support_roots,
+                        support_penetration, general_penetration,
+                    )
+                )
             ]
             fixed = [h for h in hits if not h[3]]
             if fixed:
@@ -386,6 +435,10 @@ class SceneChecker:
             and goal_pos_err <= ik_pos_tol
             and goal_rot_err <= ik_rot_tol,
         }
+
+    def _body_root_id(self, name: str) -> int:
+        bid = self.mj.mj_name2id(self.model, self.mj.mjtObj.mjOBJ_BODY, name)
+        return int(self.model.body_rootid[bid]) if bid >= 0 else -1
 
     def plan(
         self,
