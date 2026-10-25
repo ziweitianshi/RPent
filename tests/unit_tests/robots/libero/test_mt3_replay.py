@@ -428,7 +428,9 @@ def test_microwave_insert_skill_is_config_gated_and_uses_start_pose_estimates():
         frames=lambda _: slice(0, frames),
         eef=poses,
         target=poses.copy(),
-        gripper=np.array([-1.0, -1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0]),
+        # Segment event metadata is the robust held-object signal; the stored
+        # gripper sample at c varies across library demos.
+        gripper=np.array([-1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -1.0]),
         actions=np.zeros((frames, 7)),
         segments=[segments],
         pose={
@@ -464,6 +466,10 @@ def test_microwave_insert_skill_is_config_gated_and_uses_start_pose_estimates():
         "white_yellow_mug_1_main": mug.copy(),
         "microwave_1_main": microwave.copy(),
     }
+    assert enabled._segment_is_placement(1)
+    enabled._dispatch = lambda _: {}
+    enabled.run_segment(0)
+    np.testing.assert_array_equal(enabled._mug_start, mug)
     enabled._grasp_eef = np.eye(4)
     enabled._in_hand = np.linalg.inv(enabled._grasp_eef) @ mug
     enabled._last_gripper = 1.0
