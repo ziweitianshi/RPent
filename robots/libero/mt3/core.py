@@ -215,6 +215,8 @@ class MT3Config:
     #: Development-only outcome telemetry. Never used by placement control and
     #: disabled for any strict-runtime deployment.
     placement_diagnostics: bool = False
+    #: Capture insertion EEF targets and proprioceptive tracking for diagnosis.
+    placement_trace: bool = False
     #: Rotational symmetry about z per body-name substring: 0 ignores the yaw
     #: change (continuous symmetry), P folds it into +-P/2 degrees. Bodies that
     #: match nothing use their full yaw change.
@@ -574,6 +576,10 @@ class EnvHooks:
     body_poses: Callable[[list[str]], dict[str, np.ndarray]]
     #: Whether the episode has ended (success or truncation).
     done: Callable[[], bool]
+    #: Robot joint positions from proprioception when available.
+    joint_positions: Callable[[], np.ndarray] | None = None
+    #: Diagnostic-only simulator goal/contact report.
+    goal_report: Callable[[], dict[str, Any]] | None = None
     #: Object poses captured at episode start (estimated or GT in development).
     start_pose: dict[str, np.ndarray] = field(default_factory=dict)
     #: Static feasibility of grip-site paths on a copy of the live scene
@@ -624,13 +630,34 @@ class MT3Runner:
         self._grasp_eef: np.ndarray | None = None
         self._in_hand: np.ndarray | None = None
         self._mug_start: np.ndarray | None = None
+        self._placement_trace: list[dict[str, Any]] = []
+        self._placement_active = False
+        self._placement_phase = ""
 
     def _send(self, target: np.ndarray, gripper: float) -> bool:
         """Track ``target`` for one step; False once the episode has ended."""
         if self.env.done():
             return False
-        self.env.step(target_to_action(self.env.eef_pose(), target, gripper))
+        before = self.env.eef_pose()
+        self.env.step(target_to_action(before, target, gripper))
         self.steps += 1
+        if self.cfg.placement_trace and self._placement_active:
+            actual = self.env.eef_pose()
+            self._placement_trace.append({
+                "phase": self._placement_phase,
+                "target_xyz": target[:3, 3].tolist(),
+                "actual_xyz": actual[:3, 3].tolist(),
+                "target_rot": target[:3, :3].tolist(),
+                "actual_rot": actual[:3, :3].tolist(),
+                "tracking_error_m": float(np.linalg.norm(actual[:3, 3] - target[:3, 3])),
+                "joints": (self.env.joint_positions().tolist()
+                           if self.env.joint_positions is not None else []),
+                "gripper": float(gripper),
+                "mug_pose": (self.env.body_poses(["white_yellow_mug_1_main"])["white_yellow_mug_1_main"].tolist()
+                             if self.cfg.placement_diagnostics else None),
+                "goal_report": (self.env.goal_report()
+                                if self.cfg.placement_diagnostics and self.env.goal_report is not None else None),
+            })
         self._last_target, self._last_gripper = target, float(gripper)
         return not self.env.done()
 
@@ -1415,6 +1442,8 @@ class MT3Runner:
             (pre, self._last_gripper),
             (eef_target, self._last_gripper),
         ]
+        self._placement_active = True
+        self._placement_phase = "lift"
         log = {
             "segment": k,
             "ref": mug_ref,
@@ -1434,7 +1463,10 @@ class MT3Runner:
             "preinsert_depth_m": float(settings.get("preinsert_depth", 0.11)),
         }
         current = self.env.eef_pose()
-        for waypoint, grip in phases:
+        for phase_name, (waypoint, grip) in zip(
+            ("lift", "safe", "preinsert", "insert"), phases, strict=True
+        ):
+            self._placement_phase = phase_name
             distance = float(np.linalg.norm(waypoint[:3, 3] - current[:3, 3]))
             count = max(1, int(np.ceil(distance / self.cfg.align_step)))
             for i in range(1, count + 1):
@@ -1448,6 +1480,7 @@ class MT3Runner:
         # Open and hold long enough for the mug handle to disengage before
         # lifting the fingertips clear of its handle before the axial retreat.
         for _ in range(max(5, self.cfg.hold_steps)):
+            self._placement_phase = "release"
             if not self._send(eef_target, -1.0):
                 return self._close(log, n0, "done while releasing mug")
         clear = eef_target.copy()
@@ -1455,13 +1488,17 @@ class MT3Runner:
             settings.get("release_lift", 0.08)
         )
         for pose in alignment_path(eef_target, clear, self.cfg.align_step):
+            self._placement_phase = "clear"
             if not self._send(pose, -1.0):
                 break
         retreat = eef_target.copy()
         retreat[:3, 3] -= axis * float(settings.get("retreat_depth", 0.16))
         for pose in alignment_path(eef_target, retreat, self.cfg.align_step):
+            self._placement_phase = "retreat"
             if not self._send(pose, -1.0):
                 break
+        log["placement_trace"] = self._placement_trace
+        self._placement_active = False
         return self._close(log, n0, "generated insertion completed")
 
     def _feasibility(

@@ -194,6 +194,8 @@ def _hooks(
     return EnvHooks(
         step=primitives._step_env,
         eef_pose=lambda: pose_from_wxyz(env.poses([], [GRIP_SITE])[GRIP_SITE]),
+        joint_positions=lambda: np.asarray(primitives._last_obs["states"][3:9], dtype=float),
+        goal_report=env.goal_report,
         body_poses=body_poses,
         start_pose=start_poses(["white_yellow_mug_1_main", "microwave_1_main"]),
         done=lambda: bool(env.terminated or env.truncated),
